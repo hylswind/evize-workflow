@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest
+moto[ec2,iam,s3,ssm,route53,apigateway,stepfunctions,acm]
+PyYAML

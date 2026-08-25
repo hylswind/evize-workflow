@@ -1,0 +1,110 @@
+"""The console lock. moto has no signin service, so the client is faked; the
+real calls are exercised by tests/aws/test_signin.py."""
+
+from constants import ACCOUNT_ID, REGION
+
+from enclavize.aws import signin
+
+CONSOLE_ARN = f"arn:aws:iam::{ACCOUNT_ID}:user/enclavize-console"
+
+
+class FakeSignin:
+    def __init__(self, statements=None):
+        self.calls = []
+        self.statements = statements or []
+
+    def put_resource_permission_statement(self, **kwargs):
+        self.calls.append(("put_statement", kwargs))
+        return {"statementId": "stmt-1"}
+
+    def put_console_authorization_configuration(self, **kwargs):
+        self.calls.append(("enable", kwargs))
+        return {}
+
+    def delete_console_authorization_configuration(self, **kwargs):
+        self.calls.append(("disable", kwargs))
+        return {}
+
+    def delete_resource_permission_statement(self, **kwargs):
+        self.calls.append(("delete_statement", kwargs))
+        return {}
+
+    def list_resource_permission_statements(self, **kwargs):
+        self.calls.append(("list", kwargs))
+        if kwargs.get("nextToken") == "page2":
+            return {"resourcePermissionStatements": self.statements[1:]}
+        if len(self.statements) > 1:
+            return {"resourcePermissionStatements": self.statements[:1], "nextToken": "page2"}
+        return {"resourcePermissionStatements": self.statements}
+
+
+def lock(client):
+    return signin.enable_lock(
+        client,
+        vpc_id="vpc-anchor",
+        account_id=ACCOUNT_ID,
+        region=REGION,
+        excluded_principal=CONSOLE_ARN,
+        client_token="token-1",
+    )
+
+
+def test_the_lock_anchors_on_a_vpc_nothing_can_reach():
+    client = FakeSignin()
+    lock(client)
+    _, kwargs = client.calls[0]
+    assert kwargs["sourceVpc"] == "vpc-anchor"
+    assert kwargs["requestedRegion"] == REGION
+
+
+def test_only_the_console_user_is_exempt():
+    client = FakeSignin()
+    lock(client)
+    _, kwargs = client.calls[0]
+    assert kwargs["excludedPrincipal"] == CONSOLE_ARN
+
+
+def test_enforcement_is_switched_on_after_the_statement_exists():
+    # A statement alone does nothing; enabling first would be a window where the
+    # account enforces a policy that has not been written.
+    client = FakeSignin()
+    lock(client)
+    assert [name for name, _ in client.calls] == ["put_statement", "enable"]
+    assert client.calls[1][1] == {"targetId": ACCOUNT_ID}
+
+
+def test_the_statement_id_is_returned_so_it_can_be_undone():
+    assert lock(FakeSignin()) == "stmt-1"
+
+
+def test_disable_turns_enforcement_off_before_removing_the_statement():
+    # The reverse order would briefly enforce a statement that no longer exists.
+    client = FakeSignin()
+    signin.disable_lock(client, account_id=ACCOUNT_ID, statement_id="stmt-1", client_token="t")
+    assert [name for name, _ in client.calls] == ["disable", "delete_statement"]
+
+
+def test_disable_works_when_only_the_configuration_was_applied():
+    # A run that failed between the two calls still has to be recoverable.
+    client = FakeSignin()
+    signin.disable_lock(client, account_id=ACCOUNT_ID)
+    assert [name for name, _ in client.calls] == ["disable"]
+
+
+def test_listing_statements_follows_pagination():
+    # Recovery needs every statement, not just the first page.
+    client = FakeSignin(statements=[{"statementId": "a"}, {"statementId": "b"}])
+    assert [s["statementId"] for s in signin.list_statements(client)] == ["a", "b"]
+
+
+def test_the_recovery_hint_names_the_account_and_the_write_region():
+    hint = signin.recovery_hint(ACCOUNT_ID)
+    assert ACCOUNT_ID in hint
+    assert "--region us-east-1" in hint
+    assert "delete-console-authorization-configuration" in hint
+
+
+def test_the_recovery_hint_explains_why_the_cli_still_works():
+    # Anyone reading this is locked out of the console and needs to know that
+    # programmatic access is unaffected.
+    assert "SigV4" in signin.recovery_hint(ACCOUNT_ID)
