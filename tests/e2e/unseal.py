@@ -224,7 +224,7 @@ def delete_state_machines(session):
                     lambda m=machine: sfnmod.delete_state_machine(sfn, m["stateMachineArn"]))
 
 
-def delete_distributions(session, profile):
+def delete_distributions(session, profile, account):
     """Both together. Disabling one takes about twenty minutes to reach the
     edge, and doing them in turn would cost that twice.
 
@@ -259,6 +259,17 @@ def delete_distributions(session, profile):
             print(f"   {item['Id']} has not finished; re-run unseal.py to pick up from here")
     for item in items:
         attempt(f"distribution {item['Id']}", lambda i=item: cdnmod.delete(cf, i["Id"]))
+
+    # Origin access controls outlive the distributions that used them, and their
+    # names are unique per account — so one left here is what the next bring-up
+    # collides with. Named after the buckets, which is what identifies them.
+    ours = {f"{naming.proof_bucket_name(account)}-oac",
+            f"{naming.dashboard_bucket_name(account)}-oac"}
+    for page in _safe(lambda: list(cf.get_paginator("list_origin_access_controls").paginate()), []):
+        for found in page.get("OriginAccessControlList", {}).get("Items", []):
+            if found["Name"] in ours:
+                attempt(f"origin access control {found['Name']}",
+                        lambda i=found["Id"]: cdnmod.delete_origin_access_control(cf, i))
 
 
 def delete_certificates(session, profile):
@@ -425,6 +436,14 @@ def survey(session, account):
         for certificate in page["CertificateSummaryList"]:
             leftovers.append(f"certificate {certificate['DomainName']}")
 
+    for page in _safe(
+        lambda: list(session.client("cloudfront")
+                     .get_paginator("list_origin_access_controls").paginate()), []
+    ):
+        for found in page.get("OriginAccessControlList", {}).get("Items", []):
+            if found["Name"].startswith(RESOURCES.prefix):
+                leftovers.append(f"origin access control {found['Name']}")
+
     iam = session.client("iam")
     for kind, call, key in (
         ("role", lambda: iam.list_roles()["Roles"], "RoleName"),
@@ -493,7 +512,7 @@ def main(argv=None):
     delete_state_machines(session)
 
     step("the distributions")
-    delete_distributions(session, profile)
+    delete_distributions(session, profile, account)
 
     step("the certificate")
     delete_certificates(session, profile)
