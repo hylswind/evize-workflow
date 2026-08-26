@@ -93,6 +93,35 @@ def test_disable_works_when_only_the_configuration_was_applied():
     assert [name for name, _ in client.calls] == ["disable"]
 
 
+def test_the_statement_still_goes_when_the_configuration_is_already_absent():
+    """Calling this twice is the normal way a half-finished recovery finishes.
+    An absent configuration is not a reason to leave its statement behind."""
+
+    class ConfigurationAlreadyGone(FakeSignin):
+        def delete_console_authorization_configuration(self, **kwargs):
+            self.calls.append(("disable", kwargs))
+            raise ClientError(
+                {"Error": {"Code": "ResourceNotFoundException", "Message": "not found"}},
+                "DeleteConsoleAuthorizationConfiguration",
+            )
+
+    client = ConfigurationAlreadyGone()
+    signin.disable_lock(client, account_id=ACCOUNT_ID, statement_id="stmt-1")
+    assert [name for name, _ in client.calls] == ["disable", "delete_statement"]
+
+
+def test_a_real_failure_disabling_still_stops_the_teardown():
+    class Denied(FakeSignin):
+        def delete_console_authorization_configuration(self, **kwargs):
+            raise ClientError(
+                {"Error": {"Code": "AccessDeniedException", "Message": "no"}},
+                "DeleteConsoleAuthorizationConfiguration",
+            )
+
+    with pytest.raises(ClientError):
+        signin.disable_lock(Denied(), account_id=ACCOUNT_ID, statement_id="stmt-1")
+
+
 def test_listing_statements_follows_pagination():
     # Recovery needs every statement, not just the first page.
     client = FakeSignin(statements=[{"statementId": "a"}, {"statementId": "b"}])
@@ -111,6 +140,23 @@ def test_the_statements_key_matches_what_the_service_actually_sends():
     model = boto3.client("signin", region_name=REGION).meta.service_model
     output = model.operation_model("ListResourcePermissionStatements").output_shape
     assert signin.STATEMENTS_KEY in output.members, sorted(output.members)
+
+
+def test_a_listed_statement_names_its_id_differently_from_the_write_calls():
+    """Put and Delete both say statementId; only the listing says sid. Reading
+    the wrong one yields None, and disable_lock treats None as 'no statement to
+    remove' — enforcement goes off and the statement stays behind."""
+    import boto3
+
+    model = boto3.client("signin", region_name=REGION).meta.service_model
+    listed = model.operation_model("ListResourcePermissionStatements").output_shape
+    item = listed.members[signin.STATEMENTS_KEY].member
+    assert signin.STATEMENT_ID_KEY in item.members, sorted(item.members)
+
+    delete = model.operation_model("DeleteResourcePermissionStatement").input_shape
+    assert "statementId" in delete.members
+    assert signin.statement_id({signin.STATEMENT_ID_KEY: "abc"}) == "abc"
+    assert signin.statement_id({}) == ""
 
 
 def test_an_account_with_no_statements_lists_nothing_rather_than_failing():

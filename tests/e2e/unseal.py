@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 import boto3
 from botocore.exceptions import ClientError
@@ -55,6 +56,10 @@ SETUP_RESOURCES = setup_config.RESOURCES
 
 DISTRIBUTION_POLL_MAX = 2400
 DISTRIBUTION_POLL_INTERVAL = 30
+
+# A distribution hands its certificate back well after it is itself gone.
+CERTIFICATE_RELEASE_ATTEMPTS = 20
+CERTIFICATE_RELEASE_INTERVAL = 30
 
 
 def step(message):
@@ -247,8 +252,27 @@ def delete_certificates(session, profile):
     for page in acm.get_paginator("list_certificates").paginate():
         for certificate in page["CertificateSummaryList"]:
             if certificate["DomainName"] in wanted:
-                attempt(f"certificate for {certificate['DomainName']}",
-                        lambda c=certificate: acmmod.delete_certificate(acm, c["CertificateArn"]))
+                _delete_certificate_when_released(acm, certificate)
+
+
+def _delete_certificate_when_released(acm, certificate):
+    """Retried, because a distribution releases its certificate long after it
+    has itself been deleted. ACM answers ResourceInUseException in the gap."""
+    name, arn = certificate["DomainName"], certificate["CertificateArn"]
+    for remaining in range(CERTIFICATE_RELEASE_ATTEMPTS, 0, -1):
+        try:
+            acmmod.delete_certificate(acm, arn)
+            print(f"   deleted certificate for {name}")
+            return
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") != "ResourceInUseException":
+                print(f"   COULD NOT delete certificate for {name}: {exc}")
+                return
+            if remaining == 1:
+                print(f"   certificate for {name} is still in use; re-run unseal.py to finish")
+                return
+            print(f"   certificate for {name} still in use, waiting for CloudFront to release it")
+            time.sleep(CERTIFICATE_RELEASE_INTERVAL)
 
 
 def delete_buckets(session, account):
@@ -287,16 +311,39 @@ def delete_zone(session, profile):
 
 
 def delete_identities(session, account):
+    """Swept by prefix rather than by a list of names.
+
+    Two roles carry an instance profile, not one, and a role inside a profile
+    cannot be deleted — so profiles go first, and every one of them. Sweeping
+    also means a name added to either phase's config is removed here without
+    this function having to learn about it.
+    """
     iam = session.client("iam")
-    attempt(f"instance profile {RESOURCES.instance_profile()}",
-            lambda: iammod.delete_instance_profile(iam, name=RESOURCES.instance_profile()))
-    for role in (RESOURCES.admin_role, SETUP_RESOURCES.apply_role,
-                 SETUP_RESOURCES.apply_sfn_role, SETUP_RESOURCES.apply_api_role):
-        attempt(f"role {role}", lambda r=role: iammod.delete_role(iam, role=r))
-    for user in (RESOURCES.event_reader_user, RESOURCES.starter_user, RESOURCES.console_user):
-        attempt(f"user {user}", lambda u=user: iammod.delete_user(iam, user=u))
-    attempt(f"policy {SETUP_RESOURCES.apply_boundary}",
-            lambda: iammod.delete_policy(iam, policy_arn=SETUP_RESOURCES.apply_boundary_arn(account)))
+    prefix = RESOURCES.prefix
+
+    for page in iam.get_paginator("list_instance_profiles").paginate():
+        for found in page["InstanceProfiles"]:
+            if found["InstanceProfileName"].startswith(prefix):
+                attempt(f"instance profile {found['InstanceProfileName']}",
+                        lambda n=found["InstanceProfileName"]: iammod.delete_instance_profile(iam, name=n))
+
+    for page in iam.get_paginator("list_roles").paginate():
+        for found in page["Roles"]:
+            if found["RoleName"].startswith(prefix):
+                attempt(f"role {found['RoleName']}",
+                        lambda r=found["RoleName"]: iammod.delete_role(iam, role=r))
+
+    for page in iam.get_paginator("list_users").paginate():
+        for found in page["Users"]:
+            if found["UserName"].startswith(prefix):
+                attempt(f"user {found['UserName']}",
+                        lambda u=found["UserName"]: iammod.delete_user(iam, user=u))
+
+    for page in iam.get_paginator("list_policies").paginate(Scope="Local"):
+        for found in page["Policies"]:
+            if found["PolicyName"].startswith(prefix):
+                attempt(f"policy {found['PolicyName']}",
+                        lambda a=found["Arn"]: iammod.delete_policy(iam, policy_arn=a))
 
 
 def unlock_console(session, account):
@@ -305,7 +352,7 @@ def unlock_console(session, account):
     if not statements:
         print("   (no sign-in statements)")
     for statement in statements:
-        sid = statement.get("statementId") or statement.get("StatementId")
+        sid = signinmod.statement_id(statement)
         attempt(f"sign-in statement {sid}",
                 lambda s=sid: signinmod.disable_lock(signin, account_id=account, statement_id=s))
 
@@ -330,10 +377,36 @@ def send_domain_back(session, profile, target):
 
 
 def survey(session, account):
-    """What is still standing. An application's teardown missing something shows
-    up here rather than in the next cycle's preflight."""
+    """What is still standing — enclavize's own as well as an application's.
+
+    A teardown reporting all-clear while something survives is worse than one
+    that fails loudly, so this looks for everything the steps above try to
+    remove, not only the resources they do not own.
+    """
     ec2 = session.client("ec2")
     leftovers = []
+
+    for statement in _safe(
+        lambda: signinmod.list_statements(session.client("signin", region_name="us-east-1")), []
+    ):
+        leftovers.append(f"sign-in statement {signinmod.statement_id(statement)}")
+
+    for page in _safe(
+        lambda: list(session.client("acm").get_paginator("list_certificates").paginate()), []
+    ):
+        for certificate in page["CertificateSummaryList"]:
+            leftovers.append(f"certificate {certificate['DomainName']}")
+
+    iam = session.client("iam")
+    for kind, call, key in (
+        ("role", lambda: iam.list_roles()["Roles"], "RoleName"),
+        ("instance profile", lambda: iam.list_instance_profiles()["InstanceProfiles"],
+         "InstanceProfileName"),
+        ("policy", lambda: iam.list_policies(Scope="Local")["Policies"], "PolicyName"),
+    ):
+        for found in _safe(call, []):
+            if found[key].startswith(RESOURCES.prefix):
+                leftovers.append(f"{kind} {found[key]}")
     for reservation in _safe(lambda: ec2.describe_instances(
         Filters=[{"Name": "instance-state-name", "Values": ["pending", "running", "stopped"]}]
     )["Reservations"], []):

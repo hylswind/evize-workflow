@@ -20,6 +20,16 @@ test fakes can be pinned against botocore's own model: reading a key the service
 does not send yields an empty list rather than an error, and an empty list is
 indistinguishable from an unlocked account."""
 
+STATEMENT_ID_KEY = "sid"
+"""What a *listed* statement calls its id. Put and Delete both say statementId,
+and only the listing disagrees — so the same name read straight through would
+silently yield None and leave the statement in place."""
+
+
+def statement_id(statement: dict) -> str:
+    """The id of a statement as returned by a listing."""
+    return statement.get(STATEMENT_ID_KEY, "")
+
 
 def enable_lock(signin, *, vpc_id: str, account_id: str, region: str, excluded_principal: str,
                 client_token: str) -> str:
@@ -68,12 +78,21 @@ def list_statements(signin) -> list:
 
 
 def disable_lock(signin, *, account_id: str, statement_id: str = None, client_token: str = None) -> None:
-    """Undo the lock. Safe to call when only partly applied.
+    """Undo the lock. Safe to call when only partly applied, and safe to repeat.
 
     Enforcement is switched off before the statement is removed, so the account
     is never left enforcing a statement that has gone.
+
+    An already-absent configuration is not an obstacle to removing the statement
+    it used to enforce: treating it as one strands the statement in exactly the
+    case where this is called twice, which is how a half-finished recovery gets
+    finished.
     """
-    signin.delete_console_authorization_configuration(targetId=account_id)
+    try:
+        signin.delete_console_authorization_configuration(targetId=account_id)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") != "ResourceNotFoundException":
+            raise
     if statement_id:
         kwargs = {"statementId": statement_id}
         if client_token:
