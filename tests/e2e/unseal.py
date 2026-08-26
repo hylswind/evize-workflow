@@ -166,16 +166,24 @@ def run_app_teardown(profile, *, region, assume_yes):
 
 
 def terminate_instances(session):
+    """Only the ones enclavize launched, by the name it tagged them with.
+
+    An account may be running things of its own, and an application's instances
+    are its teardown's business — they are reported at the end if it misses any.
+    """
     ec2 = session.client("ec2")
     live = [
         instance["InstanceId"]
         for reservation in ec2.describe_instances(
-            Filters=[{"Name": "instance-state-name", "Values": ["pending", "running", "stopped"]}]
+            Filters=[
+                {"Name": "tag:Name", "Values": [f"{RESOURCES.prefix}*"]},
+                {"Name": "instance-state-name", "Values": ["pending", "running", "stopped"]},
+            ]
         )["Reservations"]
         for instance in reservation["Instances"]
     ]
     if not live:
-        print("   (none running)")
+        print("   (none of the enclave's own running)")
         return
     attempt(f"{len(live)} instance(s)", lambda: ec2.terminate_instances(InstanceIds=live))
 
@@ -216,17 +224,26 @@ def delete_state_machines(session):
                     lambda m=machine: sfnmod.delete_state_machine(sfn, m["stateMachineArn"]))
 
 
-def delete_distributions(session):
+def delete_distributions(session, profile):
     """Both together. Disabling one takes about twenty minutes to reach the
-    edge, and doing them in turn would cost that twice."""
+    edge, and doing them in turn would cost that twice.
+
+    Only the enclave's own, matched by the names they answer for. An account
+    may well have distributions of its own, and this is the step that cannot be
+    undone by re-running anything.
+    """
     cf = session.client("cloudfront")
-    items = [
-        item
-        for page in cf.get_paginator("list_distributions").paginate()
-        for item in page.get("DistributionList", {}).get("Items", [])
-    ]
+    ours = {naming.dashboard_host(profile.domain), naming.proof_host(profile.domain)}
+    items, skipped = [], []
+    for page in cf.get_paginator("list_distributions").paginate():
+        for item in page.get("DistributionList", {}).get("Items", []):
+            aliases = set((item.get("Aliases") or {}).get("Items") or [])
+            (items if aliases & ours else skipped).append(item)
+
+    for item in skipped:
+        print(f"   leaving {item['Id']} alone; it serves {sorted(set((item.get('Aliases') or {}).get('Items') or [])) or 'no enclave name'}")
     if not items:
-        print("   (none)")
+        print("   (none of the enclave's own)")
         return
 
     for item in items:
@@ -282,32 +299,43 @@ def delete_buckets(session, account):
 
 
 def delete_zone(session, profile):
-    r53 = session.client("route53")
-    zones = [z for z in _safe(
-        lambda: r53.list_hosted_zones_by_name(DNSName=profile.domain)["HostedZones"], [])
-        if z["Name"].rstrip(".") == profile.domain]
-    if not zones:
-        print("   (no hosted zone)")
-        return
-    zone_id = zones[0]["Id"].split("/")[-1]
+    """Only zones this program created, identified by their creation stamp.
 
-    # NS and SOA at the apex cannot be deleted and are removed with the zone.
-    doomed = [
-        record
-        for page in r53.get_paginator("list_resource_record_sets").paginate(HostedZoneId=zone_id)
-        for record in page["ResourceRecordSets"]
-        if not (record["Name"].rstrip(".") == profile.domain and record["Type"] in ("NS", "SOA"))
-    ]
-    if doomed:
-        attempt(
-            f"{len(doomed)} record(s) in {profile.domain}",
-            lambda: dnsmod.change_records(
-                r53, zone_id=zone_id,
-                changes=[{"Action": "DELETE", "ResourceRecordSet": r} for r in doomed],
-                comment="enclavize teardown",
-            ),
-        )
-    attempt(f"hosted zone {zone_id}", lambda: dnsmod.delete_zone(r53, zone_id))
+    A domain that has ever been registered here already has a zone, and it is
+    the one holding whatever mail and records the owner set up. Matching on the
+    domain name alone would take that one.
+    """
+    r53 = session.client("route53")
+    named = [z for z in _safe(lambda: r53.list_hosted_zones()["HostedZones"], [])
+             if z["Name"].rstrip(".") == profile.domain]
+    ours = [z for z in named if naming.is_ours(z.get("CallerReference"))]
+
+    for zone in named:
+        if zone not in ours:
+            print(f"   leaving {zone['Id'].split('/')[-1]} alone; not created by enclavize")
+    if not ours:
+        print("   (no hosted zone of the enclave's own)")
+        return
+
+    for zone in ours:
+        zone_id = zone["Id"].split("/")[-1]
+        # NS and SOA at the apex cannot be deleted and go with the zone.
+        doomed = [
+            record
+            for page in r53.get_paginator("list_resource_record_sets").paginate(HostedZoneId=zone_id)
+            for record in page["ResourceRecordSets"]
+            if not (record["Name"].rstrip(".") == profile.domain and record["Type"] in ("NS", "SOA"))
+        ]
+        if doomed:
+            attempt(
+                f"{len(doomed)} record(s) in {zone_id}",
+                lambda z=zone_id, d=doomed: dnsmod.change_records(
+                    r53, zone_id=z,
+                    changes=[{"Action": "DELETE", "ResourceRecordSet": r} for r in d],
+                    comment="enclavize teardown",
+                ),
+            )
+        attempt(f"hosted zone {zone_id}", lambda z=zone_id: dnsmod.delete_zone(r53, z))
 
 
 def delete_identities(session, account):
@@ -465,7 +493,7 @@ def main(argv=None):
     delete_state_machines(session)
 
     step("the distributions")
-    delete_distributions(session)
+    delete_distributions(session, profile)
 
     step("the certificate")
     delete_certificates(session, profile)

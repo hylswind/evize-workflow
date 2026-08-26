@@ -33,6 +33,25 @@ def proof_host(domain: str) -> str:
     return f"proof.{domain}"
 
 
+CALLER_REFERENCE_PREFIX = "enclavize-"
+"""Stamped on the hosted zone and both distributions as they are created.
+
+It is what a teardown has to go on. An account may already hold a zone for this
+domain — a registrar creates one — or distributions of its own, and a domain
+name alone cannot tell those apart from the ones this program made. Removing the
+wrong one destroys something nobody can put back.
+"""
+
+
+def caller_reference(account_id: str, unique: str) -> str:
+    """A creation stamp that says this program made the thing carrying it."""
+    return f"{CALLER_REFERENCE_PREFIX}{account_id}-{unique}"
+
+
+def is_ours(caller_reference_value: str) -> bool:
+    return str(caller_reference_value or "").startswith(CALLER_REFERENCE_PREFIX)
+
+
 def apply_host(domain: str) -> str:
     """Where commits are applied.
 

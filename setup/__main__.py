@@ -64,7 +64,7 @@ def run(*, domain: str, app_repo: str, api_key: str, region: str, res=None, log=
     iam_client = session.client("iam")
 
     account_id = sts.account_id(session.client("sts"))
-    reference = f"enclavize-{account_id}-{uuid.uuid4()}"
+    reference = naming.caller_reference(account_id, str(uuid.uuid4()))
     log(f"bringing up {domain} in {account_id}")
 
     dashboard_host = naming.dashboard_host(domain)
