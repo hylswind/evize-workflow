@@ -15,7 +15,7 @@ def setup_script(**overrides):
         region=REGION,
         domain=DOMAIN,
         app_repo=APP_REPO,
-        deploy_api_key=API_KEY,
+        apply_api_key=API_KEY,
         go_param=GO_PARAM,
     )
     kwargs.update(overrides)
@@ -33,7 +33,7 @@ def test_setup_stops_tracing_before_exporting_the_api_key():
     # Console output is readable by anyone who can call EC2, and set -x would
     # echo the secret into it.
     script = setup_script()
-    assert script.index("set +x") < script.index("ENCLAVIZE_DEPLOY_API_KEY")
+    assert script.index("set +x") < script.index("ENCLAVIZE_APPLY_API_KEY")
 
 
 def test_setup_waits_for_the_go_flag_before_running_anything():
@@ -44,7 +44,7 @@ def test_setup_waits_for_the_go_flag_before_running_anything():
 
 
 def test_setup_invokes_the_module_directly_with_no_shell_contract():
-    # setup.sh is the deploy-time contract with an app repo; enclavize's own
+    # setup.sh is the apply-time contract with an app repo; enclavize's own
     # bring-up needs no such indirection.
     script = setup_script()
     assert "exec python3 -m setup" in script
@@ -72,9 +72,9 @@ def test_setup_installs_what_it_needs_to_run_python():
     assert "pip3 install -r requirements.txt" in script
 
 
-def test_deploy_clones_the_app_repo_and_runs_its_entrypoint():
+def test_apply_clones_the_app_repo_and_runs_its_entrypoint():
     commit = "b" * 40
-    script = userdata.build_deploy_userdata(
+    script = userdata.build_apply_userdata(
         app_repo=APP_REPO, commit=commit, region=REGION, domain=DOMAIN
     )
     assert f"git clone https://github.com/{APP_REPO}.git" in script
@@ -82,18 +82,18 @@ def test_deploy_clones_the_app_repo_and_runs_its_entrypoint():
     assert "exec ./setup.sh" in script
 
 
-def test_deploy_does_not_carry_the_api_key():
-    # A deploy instance has no business holding the key that triggers deploys.
-    script = userdata.build_deploy_userdata(
+def test_apply_does_not_carry_the_api_key():
+    # An apply instance has no business holding the key that triggers applies.
+    script = userdata.build_apply_userdata(
         app_repo=APP_REPO, commit="c" * 40, region=REGION, domain=DOMAIN
     )
-    assert "DEPLOY_API_KEY" not in script
+    assert "APPLY_API_KEY" not in script
 
 
 def test_both_scripts_fail_fast():
     scripts = [
         setup_script(),
-        userdata.build_deploy_userdata(app_repo=APP_REPO, commit="d" * 40, region=REGION, domain=DOMAIN),
+        userdata.build_apply_userdata(app_repo=APP_REPO, commit="d" * 40, region=REGION, domain=DOMAIN),
     ]
     for script in scripts:
         assert script.startswith("#!/bin/bash\nset -euxo pipefail")

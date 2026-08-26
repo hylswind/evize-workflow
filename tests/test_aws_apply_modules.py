@@ -1,4 +1,4 @@
-"""The deploy interface: state machine, REST API, certificate, distribution.
+"""The apply interface: state machine, REST API, certificate, distribution.
 
 These pin request shapes. moto covers apigateway and stepfunctions well enough
 to create real objects; ACM and CloudFront are driven through fakes where the
@@ -47,18 +47,18 @@ def test_the_state_machine_is_express_so_it_can_answer_synchronously():
             return {"stateMachineArn": "arn:sm"}
 
     sfn.create_state_machine(
-        Recorder(), name="enclavize-deploy",
+        Recorder(), name="enclavize-apply",
         definition={"StartAt": "Done", "States": {"Done": {"Type": "Succeed"}}},
-        role_arn="arn:aws:iam::123456789012:role/enclavize-deploy-sfn",
+        role_arn="arn:aws:iam::123456789012:role/enclavize-apply-sfn",
     )
     assert recorded["type"] == "EXPRESS"
 
 
 def test_the_definition_round_trips(sfn_client):
-    role = "arn:aws:iam::123456789012:role/enclavize-deploy-sfn"
+    role = "arn:aws:iam::123456789012:role/enclavize-apply-sfn"
     definition = {"StartAt": "Done", "States": {"Done": {"Type": "Succeed"}}}
 
-    arn = sfn.create_state_machine(sfn_client, name="enclavize-deploy", definition=definition, role_arn=role)
+    arn = sfn.create_state_machine(sfn_client, name="enclavize-apply", definition=definition, role_arn=role)
 
     described = sfn_client.describe_state_machine(stateMachineArn=arn)
     assert json.loads(described["definition"]) == definition
@@ -92,16 +92,16 @@ def test_the_payload_is_sent_as_json():
 
 
 def test_the_api_is_rest_because_http_apis_have_no_api_keys(apigw_client):
-    api_id = apigw.create_api(apigw_client, name="enclavize-deploy-api")
+    api_id = apigw.create_api(apigw_client, name="enclavize-apply-api")
     described = apigw_client.get_rest_api(restApiId=api_id)
     assert described["apiKeySource"] == "HEADER"
 
 
 def test_the_model_only_admits_a_well_formed_commit(apigw_client):
-    api_id = apigw.create_api(apigw_client, name="enclavize-deploy-api")
-    apigw.create_commit_model(apigw_client, api_id=api_id, name="DeployRequest", pattern=COMMIT_PATTERN)
+    api_id = apigw.create_api(apigw_client, name="enclavize-apply-api")
+    apigw.create_commit_model(apigw_client, api_id=api_id, name="ApplyRequest", pattern=COMMIT_PATTERN)
 
-    model = apigw_client.get_model(restApiId=api_id, modelName="DeployRequest")
+    model = apigw_client.get_model(restApiId=api_id, modelName="ApplyRequest")
     schema = json.loads(model["schema"])
     assert schema["properties"]["commit"]["pattern"] == COMMIT_PATTERN
     assert schema["required"] == ["commit"]
@@ -110,37 +110,37 @@ def test_the_model_only_admits_a_well_formed_commit(apigw_client):
 
 
 def test_the_method_demands_a_key_and_a_validated_body(apigw_client):
-    api_id = apigw.create_api(apigw_client, name="enclavize-deploy-api")
+    api_id = apigw.create_api(apigw_client, name="enclavize-apply-api")
     root = apigw.root_resource_id(apigw_client, api_id)
-    resource_id = apigw.create_resource(apigw_client, api_id=api_id, parent_id=root, path_part="deployments")
-    apigw.create_commit_model(apigw_client, api_id=api_id, name="DeployRequest", pattern=COMMIT_PATTERN)
+    resource_id = apigw.create_resource(apigw_client, api_id=api_id, parent_id=root, path_part="commits")
+    apigw.create_commit_model(apigw_client, api_id=api_id, name="ApplyRequest", pattern=COMMIT_PATTERN)
     validator_id = apigw.create_body_validator(apigw_client, api_id=api_id, name="body")
 
     apigw.put_key_protected_method(
         apigw_client, api_id=api_id, resource_id=resource_id, http_method="POST",
-        model_name="DeployRequest", validator_id=validator_id,
+        model_name="ApplyRequest", validator_id=validator_id,
     )
 
     method = apigw_client.get_method(restApiId=api_id, resourceId=resource_id, httpMethod="POST")
     assert method["apiKeyRequired"] is True
-    assert method["requestModels"] == {"application/json": "DeployRequest"}
+    assert method["requestModels"] == {"application/json": "ApplyRequest"}
     assert method["requestValidatorId"] == validator_id
 
 
 def test_the_key_uses_the_value_the_operator_already_holds(apigw_client):
     # Generated server-side, the sealed account would have to hand it back out.
-    key_id = apigw.create_api_key(apigw_client, name="enclavize-deploy", value="k" * 32)
+    key_id = apigw.create_api_key(apigw_client, name="enclavize-apply", value="k" * 32)
     stored = apigw_client.get_api_key(apiKey=key_id, includeValue=True)
     assert stored["value"] == "k" * 32
     assert stored["enabled"] is True
 
 
 def test_the_key_is_bound_to_one_stage(apigw_client):
-    api_id = apigw.create_api(apigw_client, name="enclavize-deploy-api")
-    key_id = apigw.create_api_key(apigw_client, name="enclavize-deploy", value="k" * 32)
+    api_id = apigw.create_api(apigw_client, name="enclavize-apply-api")
+    key_id = apigw.create_api_key(apigw_client, name="enclavize-apply", value="k" * 32)
 
     plan_id = apigw.attach_key_to_plan(
-        apigw_client, name="enclavize-deploy-plan", api_id=api_id, stage="v1", key_id=key_id
+        apigw_client, name="enclavize-apply-plan", api_id=api_id, stage="v1", key_id=key_id
     )
 
     plan = apigw_client.get_usage_plan(usagePlanId=plan_id)
@@ -174,8 +174,80 @@ def test_the_integration_targets_start_sync_execution():
 
 
 def test_the_invoke_url_is_regional():
-    url = apigw.invoke_url(api_id="abc123", region=REGION, stage="v1", path="deployments")
-    assert url == f"https://abc123.execute-api.{REGION}.amazonaws.com/v1/deployments"
+    url = apigw.invoke_url(api_id="abc123", region=REGION, stage="v1", path="commits")
+    assert url == f"https://abc123.execute-api.{REGION}.amazonaws.com/v1/commits"
+
+
+# --- the custom domain ----------------------------------------------------
+#
+# The generated endpoint above is unusable knowledge: the account is sealed, so
+# nobody can look up the id. These pin the name that can be derived instead.
+
+
+def test_the_public_url_needs_only_the_domain():
+    assert apigw.public_url(host=f"apply.{DOMAIN}", stage="v1", path="commits") == (
+        f"https://apply.{DOMAIN}/v1/commits"
+    )
+
+
+def test_the_custom_domain_is_regional_like_the_api(apigw_client):
+    """The endpoint types have to match, and regional avoids building a
+    CloudFront distribution that would spend half an hour propagating."""
+    recorded = {}
+
+    class Recorder:
+        def create_domain_name(self, **kwargs):
+            recorded.update(kwargs)
+            return {"regionalDomainName": "d-x.execute-api.us-east-1.amazonaws.com",
+                    "regionalHostedZoneId": "ZONE"}
+
+    target = apigw.create_custom_domain(
+        Recorder(), host=f"apply.{DOMAIN}", certificate_arn="arn:cert"
+    )
+    assert recorded["endpointConfiguration"] == {"types": ["REGIONAL"]}
+    # A regional domain reads its certificate from the regional field; passing
+    # certificateArn instead is silently ignored and the domain serves nothing.
+    assert recorded["regionalCertificateArn"] == "arn:cert"
+    assert "certificateArn" not in recorded
+    assert target == {"target_dns": "d-x.execute-api.us-east-1.amazonaws.com",
+                      "target_zone": "ZONE"}
+
+
+def test_the_alias_target_comes_from_the_response(apigw_client):
+    """Not constructed: the regional endpoint's hosted zone id is AWS's to
+    choose, and hardcoding one would point the alias at the wrong region."""
+    apigw_client.create_domain_name(
+        domainName=f"apply.{DOMAIN}", regionalCertificateArn="arn:cert",
+        endpointConfiguration={"types": ["REGIONAL"]},
+    )
+    described = apigw_client.get_domain_name(domainName=f"apply.{DOMAIN}")
+    assert described["regionalDomainName"]
+    assert described["regionalHostedZoneId"]
+
+
+def test_the_stage_stays_in_the_path(apigw_client):
+    """Omitting basePath maps the stage at the root and the stage name vanishes
+    from the URL, leaving nowhere to put a second one later."""
+    api_id = apigw.create_api(apigw_client, name="enclavize-apply")
+    root = apigw.root_resource_id(apigw_client, api_id)
+    resource_id = apigw.create_resource(
+        apigw_client, api_id=api_id, parent_id=root, path_part="commits"
+    )
+    apigw_client.put_method(restApiId=api_id, resourceId=resource_id, httpMethod="POST",
+                            authorizationType="NONE", apiKeyRequired=True)
+    apigw_client.put_integration(restApiId=api_id, resourceId=resource_id, httpMethod="POST",
+                                 type="MOCK", integrationHttpMethod="POST")
+    apigw.deploy(apigw_client, api_id=api_id, stage="v1")
+    apigw_client.create_domain_name(
+        domainName=f"apply.{DOMAIN}", regionalCertificateArn="arn:cert",
+        endpointConfiguration={"types": ["REGIONAL"]},
+    )
+    apigw.map_base_path(
+        apigw_client, host=f"apply.{DOMAIN}", api_id=api_id, stage="v1", base_path="v1"
+    )
+    mapping = apigw_client.get_base_path_mappings(domainName=f"apply.{DOMAIN}")["items"][0]
+    assert mapping["basePath"] == "v1"
+    assert mapping["stage"] == "v1"
 
 
 # --- ACM ------------------------------------------------------------------
@@ -195,14 +267,16 @@ class FakeAcm:
         return {"Certificate": state}
 
 
-def test_the_certificate_covers_both_public_hosts():
+def test_the_certificate_covers_every_public_host():
+    """All three names ride on one certificate — apply. included, since a custom
+    domain is rejected without one."""
     client = FakeAcm([{"Status": "ISSUED"}])
+    names = [f"dashboard.{DOMAIN}", f"proof.{DOMAIN}", f"apply.{DOMAIN}"]
     acmmod.request_certificate(
-        client, domain=DOMAIN, alternative_names=[f"dashboard.{DOMAIN}", f"proof.{DOMAIN}"],
-        idempotency_token="tok",
+        client, domain=DOMAIN, alternative_names=names, idempotency_token="tok",
     )
     assert client.requests[0]["ValidationMethod"] == "DNS"
-    assert client.requests[0]["SubjectAlternativeNames"] == [f"dashboard.{DOMAIN}", f"proof.{DOMAIN}"]
+    assert client.requests[0]["SubjectAlternativeNames"] == names
 
 
 def test_validation_records_are_waited_for_rather_than_read_once():

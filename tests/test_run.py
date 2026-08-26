@@ -17,7 +17,7 @@ BASE_ENV = {
     "ENCLAVIZE_ROOT_KEY": "AKIAROOT",
     "ENCLAVIZE_ROOT_SECRET": "rootsecret",
     "ENCLAVIZE_TRANSFER_PASSWORD": "transfer-pw",
-    "ENCLAVIZE_DEPLOY_API_KEY": "deploy-key",
+    "ENCLAVIZE_APPLY_API_KEY": "apply-key",
     "ENCLAVIZE_DOMAIN": DOMAIN,
     "ENCLAVIZE_START": "1700000000",
     "ENCLAVIZE_REPO": APP_REPO,
@@ -227,7 +227,7 @@ def test_a_non_numeric_start_is_rejected():
         run_module.RunConfig.from_env(env(ENCLAVIZE_START="yesterday"))
 
 
-@pytest.mark.parametrize("missing", ["ENCLAVIZE_ROOT_KEY", "ENCLAVIZE_DEPLOY_API_KEY", "ENCLAVIZE_REPO"])
+@pytest.mark.parametrize("missing", ["ENCLAVIZE_ROOT_KEY", "ENCLAVIZE_APPLY_API_KEY", "ENCLAVIZE_REPO"])
 def test_a_missing_requirement_is_named(missing):
     with pytest.raises(ValueError, match=missing):
         run_module.RunConfig.from_env(env(**{missing: None}))

@@ -7,7 +7,7 @@
 
 const STATES = {
   starting: "bringing the account up",
-  "deploy-ready": "deploy interface ready",
+  "apply-ready": "apply interface ready",
   complete: "enclaved",
 };
 

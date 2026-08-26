@@ -62,7 +62,7 @@ jobs:
       ROOT_KEY_ID: ${{ secrets.ROOT_KEY_ID }}
       ROOT_SECRET: ${{ secrets.ROOT_SECRET }}
       TRANSFER_PASSWORD: ${{ secrets.TRANSFER_PASSWORD }}
-      DEPLOY_API_KEY: ${{ secrets.DEPLOY_API_KEY }}
+      APPLY_API_KEY: ${{ secrets.APPLY_API_KEY }}
       CONSOLE_ZIP_PASSWORD: ${{ secrets.CONSOLE_ZIP_PASSWORD }}
 ```
 
@@ -94,7 +94,7 @@ then publishes a null MX so that address stops working.
 |---|---|
 | `domain` | the domain being transferred in |
 | `start` | unix seconds; the audit window opens here and must be in the past |
-| `repo` | the application repo this account will be able to deploy |
+| `repo` | the application repo whose commits this account can apply |
 | `bypass_event_check` | skip the history audit. Marks the statement `debug` |
 | `bypass_domain_transfer` | skip accepting the transfer, for an account that already holds the domain. Marks the statement `debug` |
 
@@ -137,12 +137,12 @@ same attestation. It builds:
 - a hosted zone, since a transferred domain does not bring its old one, and the
   registrar pointed at it
 - a null MX (RFC 7505), which kills the account's email address
-- a certificate covering both public names
+- a certificate covering all three public names
 - `dashboard.{domain}`, served from `setup/assets/dashboard/` — static files,
   nothing to build
 - `proof.{domain}`, serving the signed statement and the bundle it was signed
   with
-- the deploy interface, described below
+- `apply.{domain}`, the interface described below
 
 It then checks the published statement against its bundle, deletes the starter
 user — after which nothing inside the account can rewrite the proof — and
@@ -154,36 +154,50 @@ terminates itself, so nothing is left holding admin.
 finished. Beside the page, `status.json` carries the same state in
 machine-readable form, so the wait can be polled rather than watched.
 
-### Deploying an application
+### Applying a commit
 
 ```
-curl -X POST https://<api>/v1/deployments \
-  -H "x-api-key: $DEPLOY_API_KEY" \
+curl -X POST https://apply.{domain}/v1/commits \
+  -H "x-api-key: $APPLY_API_KEY" \
   -H 'content-type: application/json' \
   -d '{"commit":"<40-hex sha>"}'
 ```
 
+Applying a commit, not deploying an application: what that commit's `setup.sh`
+does is its own business. It may ship a new version of the application, or only
+rearrange the account's resources, or both. The account is whatever the last
+applied commit made it.
+
+The endpoint is a name rather than the generated `execute-api` one because
+nothing in a sealed account can tell you the generated one — it is computed on
+an instance that then terminates itself, in an account with no console and no
+credentials. `apply.{domain}` follows from the domain alone.
+
 The commit must be a 40-hex sha — checked at the edge, because it ends up in a
 shell command. The state machine launches an instance and answers immediately;
-it does not wait for the deploy, which is what keeps it inside API Gateway's
-integration limit. Watch the dashboard for progress.
+it does not wait for the commit to finish applying, which is what keeps it
+inside API Gateway's integration limit. Watch the dashboard for progress.
 
 The application repo must have an executable `setup.sh` at its root. That is the
 only interface enclavize requires of it.
 
-A deploy instance runs with `AdministratorAccess`, capped by a permission
+An apply instance runs with `AdministratorAccess`, capped by a permission
 boundary. It can build whatever the application needs — its own API Gateway
 APIs, Step Functions workflows, CloudFront distributions, and records anywhere
 in the domain including the apex.
 
 What it cannot touch is the enclave itself: the `enclavize-*` identities, the
 sign-in lock, the domain registration, the proof and dashboard buckets,
-enclavize's own API, state machine and two distributions, the `dashboard.` and
-`proof.` records, and the apex MX, NS and SOA.
+enclavize's own API, custom domain, state machine and two distributions, the
+`dashboard.`, `proof.` and `apply.` records, and the apex MX, NS and SOA.
+
+That last set matters as much as the rest: taking `apply.{domain}` would let an
+application answer in the enclave's place and read the API key out of the header
+of every request meant for the real endpoint.
 
 The boundary carries the rule that anything created under it must carry it too,
-so the fence holds at any depth rather than ending at the first role a deploy
-makes for itself.
+so the fence holds at any depth rather than ending at the first role an applied
+commit makes for itself.
 
 ## Layout
 
@@ -226,9 +240,11 @@ python tests/aws/reaper.py --prefix t1a2b3c4-
 
 Modules that cannot be exercised this way are left to the end-to-end run
 instead: `signin` locks the account's console, `domains.accept_transfer` needs a
-real pending transfer and moves the domain when it succeeds, and `acm` and `cdn`
-leave resources that take far longer to retire than to create. Those are all
-proven by a full run against a sacrificial account rather than in isolation.
+real pending transfer and moves the domain when it succeeds, `apigw`'s custom
+domain needs a certificate for a domain the account actually holds, and `acm`
+and `cdn` leave resources that take far longer to retire than to create. Those
+are all proven by a full run against a sacrificial account rather than in
+isolation.
 
 `tests/aws/test_proof_handoff.py` drives both halves of the proof exchange in one
 account. It is the only place the two phases interact, and the failure it guards

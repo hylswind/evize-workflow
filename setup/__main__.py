@@ -6,7 +6,7 @@ there are no credentials — so the ordering is chosen around two things:
 
 - the proof bucket is created first, because the workflow is already waiting on
   it and everything after it is slow
-- the dashboard is built before the deploy machinery, because it answering at
+- the dashboard is built before the apply machinery, because it answering at
   all is the operator's only sign that the bring-up is working
 
 The instance destroys itself at the end. Nothing is left holding admin.
@@ -21,10 +21,10 @@ import uuid
 from enclavize.aws import acm, cdn, dns, domains, ec2, s3, sts
 from enclavize.logic import naming
 
-from . import clients, config, dashboard, deploy, proof
+from . import apply, clients, config, dashboard, proof
 
 AMI_PARAM = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
-DEPLOY_INSTANCE_TYPE = "t3.small"
+APPLY_INSTANCE_TYPE = "t3.small"
 
 
 def env(name: str, *, required: bool = True) -> str:
@@ -69,6 +69,7 @@ def run(*, domain: str, app_repo: str, api_key: str, region: str, res=None, log=
 
     dashboard_host = naming.dashboard_host(domain)
     proof_host = naming.proof_host(domain)
+    apply_host = naming.apply_host(domain)
     dashboard_bucket = naming.dashboard_bucket_name(account_id)
 
     # --- everything that needs no waiting, first ---------------------------
@@ -102,7 +103,7 @@ def run(*, domain: str, app_repo: str, api_key: str, region: str, res=None, log=
     # only validation needs the delegation, and ACM re-checks periodically — so
     # publishing the records now means it can pass the moment delegation lands.
     certificate_arn = acm.request_certificate(
-        acm_client, domain=dashboard_host, alternative_names=[proof_host],
+        acm_client, domain=dashboard_host, alternative_names=[proof_host, apply_host],
         idempotency_token=uuid.uuid4().hex[:32],
     )
     records = acm.validation_records(acm_client, certificate_arn)
@@ -123,23 +124,22 @@ def run(*, domain: str, app_repo: str, api_key: str, region: str, res=None, log=
 
     # None of this needs the certificate — only the account and the bucket
     # names — so it fills the wait instead of following it.
-    roles = deploy.create_roles(
+    roles = apply.create_roles(
         iam_client, res=res, account_id=account_id, region=region,
         proof_bucket=proof_bucket, dashboard_bucket=dashboard_bucket,
         domain=domain, hosted_zone_id=zone_id,
     )
-    state_machine_arn = deploy.create_state_machine(
+    state_machine_arn = apply.create_state_machine(
         session.client("stepfunctions"), session.client("ec2"), session.client("ssm"),
         res=res, app_repo=app_repo, region=region, domain=domain,
         dashboard_bucket=dashboard_bucket, role_arn=roles["sfn_role_arn"],
-        ami_param=AMI_PARAM, instance_type=DEPLOY_INSTANCE_TYPE,
+        ami_param=AMI_PARAM, instance_type=APPLY_INSTANCE_TYPE,
     )
-    url, api_id = deploy.create_api(
+    _, api_id = apply.create_api(
         session.client("apigateway"), iam_client, res=res, region=region, api_key=api_key,
         state_machine_arn=state_machine_arn, api_role_arn=roles["api_role_arn"], account_id=account_id,
     )
-    log(f"deploy API at {url}")
-    dashboard.mark(s3_client, bucket=dashboard_bucket, domain=domain, state="deploy-ready")
+    dashboard.mark(s3_client, bucket=dashboard_bucket, domain=domain, state="apply-ready")
 
     log("waiting for the certificate; this is the longest wait in the bring-up")
     acm.await_issued(acm_client, certificate_arn,
@@ -147,7 +147,14 @@ def run(*, domain: str, app_repo: str, api_key: str, region: str, res=None, log=
                      interval=config.CERT_VALIDATION_POLL_INTERVAL)
     log("certificate issued")
 
-    # --- both sites, deploying at the same time ----------------------------
+    # --- everything the certificate was blocking ---------------------------
+
+    # Regional, so there is no distribution to propagate and this is immediate.
+    url = apply.attach_custom_domain(
+        session.client("apigateway"), r53, api_id=api_id, domain=domain,
+        certificate_arn=certificate_arn, zone_id=zone_id, region=region,
+    )
+    log(f"apply endpoint at {url}")
 
     distributions = {
         "dashboard": dashboard.attach_cdn(
@@ -171,7 +178,7 @@ def run(*, domain: str, app_repo: str, api_key: str, region: str, res=None, log=
     # Now that the API and both distributions exist, replace the service-wide
     # denial with one naming only the enclave's own resources — so an
     # application can use API Gateway, Step Functions and CloudFront for itself.
-    deploy.tighten_boundary(
+    apply.tighten_boundary(
         iam_client, res=res, account_id=account_id, region=region,
         proof_bucket=proof_bucket, dashboard_bucket=dashboard_bucket,
         domain=domain, hosted_zone_id=zone_id,
@@ -189,7 +196,7 @@ def run(*, domain: str, app_repo: str, api_key: str, region: str, res=None, log=
     log("bring-up complete")
     return {
         "account_id": account_id,
-        "deploy_url": url,
+        "apply_url": url,
         "proof_published": published,
         "dashboard_bucket": dashboard_bucket,
     }
@@ -201,7 +208,7 @@ def main(argv=None):
         run(
             domain=env("ENCLAVIZE_DOMAIN"),
             app_repo=env("ENCLAVIZE_APP_REPO"),
-            api_key=env("ENCLAVIZE_DEPLOY_API_KEY"),
+            api_key=env("ENCLAVIZE_APPLY_API_KEY"),
             region=region,
         )
     finally:

@@ -38,7 +38,7 @@ def default_document(iam, arn):
 
 def test_a_new_document_becomes_the_default(iam):
     """This is how the boundary is narrowed once the real ARNs exist."""
-    arn = iammod.create_policy(iam, name="enclavize-deploy-boundary", document=a_policy(1))
+    arn = iammod.create_policy(iam, name="enclavize-apply-boundary", document=a_policy(1))
 
     iammod.set_policy_document(iam, policy_arn=arn, document=a_policy(2))
 
@@ -49,7 +49,7 @@ def test_the_oldest_version_is_dropped_at_the_five_version_cap(iam):
     """IAM allows five versions and then refuses. Without pruning, a re-run of
     the bring-up would fail here — late, and with the boundary left in its
     wider form."""
-    arn = iammod.create_policy(iam, name="enclavize-deploy-boundary", document=a_policy(0))
+    arn = iammod.create_policy(iam, name="enclavize-apply-boundary", document=a_policy(0))
 
     for n in range(1, 8):
         iammod.set_policy_document(iam, policy_arn=arn, document=a_policy(n))
@@ -61,7 +61,7 @@ def test_the_oldest_version_is_dropped_at_the_five_version_cap(iam):
 
 
 def test_the_default_version_is_never_the_one_pruned(iam):
-    arn = iammod.create_policy(iam, name="enclavize-deploy-boundary", document=a_policy(0))
+    arn = iammod.create_policy(iam, name="enclavize-apply-boundary", document=a_policy(0))
     for n in range(1, 8):
         iammod.set_policy_document(iam, policy_arn=arn, document=a_policy(n))
 
@@ -71,23 +71,23 @@ def test_the_default_version_is_never_the_one_pruned(iam):
 
 def test_the_real_boundary_document_can_be_rotated(iam):
     """The service-wide form is created first and narrowed in place."""
-    wide = policies.deploy_boundary_policy(
+    wide = policies.apply_boundary_policy(
         account_id=ACCOUNT_ID, region=REGION, resource_prefix="enclavize-",
         proof_bucket="p", dashboard_bucket="d", domain="example.com",
-        hosted_zone_id="Z1", state_machine="enclavize-deploy",
+        hosted_zone_id="Z1", state_machine="enclavize-apply",
     )
-    narrow = policies.deploy_boundary_policy(
+    narrow = policies.apply_boundary_policy(
         account_id=ACCOUNT_ID, region=REGION, resource_prefix="enclavize-",
         proof_bucket="p", dashboard_bucket="d", domain="example.com",
-        hosted_zone_id="Z1", state_machine="enclavize-deploy",
+        hosted_zone_id="Z1", state_machine="enclavize-apply",
         protected={"api_id": "abc", "distribution_ids": ["E1"]},
     )
-    arn = iammod.create_policy(iam, name="enclavize-deploy-boundary", document=wide)
+    arn = iammod.create_policy(iam, name="enclavize-apply-boundary", document=wide)
 
     iammod.set_policy_document(iam, policy_arn=arn, document=narrow)
 
     machinery = [s for s in default_document(iam, arn)["Statement"]
-                 if s.get("Sid") == "CannotRewriteTheDeployMachinery"][0]
+                 if s.get("Sid") == "CannotRewriteTheApplyMachinery"][0]
     assert machinery["Resource"] != "*"
 
 
@@ -96,23 +96,23 @@ def test_the_real_boundary_document_can_be_rotated(iam):
 
 def test_a_role_is_stripped_before_it_is_deleted(iam):
     """IAM refuses to delete a role that still has policies attached."""
-    iammod.create_role(iam, name="enclavize-deploy", trust=policies.EC2_TRUST)
-    iammod.attach_role_policy(iam, role="enclavize-deploy", policy_arn=policies.ADMIN_MANAGED_POLICY)
-    iammod.put_role_policy(iam, role="enclavize-deploy", name="inline", document=a_policy())
+    iammod.create_role(iam, name="enclavize-apply", trust=policies.EC2_TRUST)
+    iammod.attach_role_policy(iam, role="enclavize-apply", policy_arn=policies.ADMIN_MANAGED_POLICY)
+    iammod.put_role_policy(iam, role="enclavize-apply", name="inline", document=a_policy())
 
-    iammod.delete_role(iam, role="enclavize-deploy")
+    iammod.delete_role(iam, role="enclavize-apply")
 
     with pytest.raises(ClientError) as exc:
-        iam.get_role(RoleName="enclavize-deploy")
+        iam.get_role(RoleName="enclavize-apply")
     assert exc.value.response["Error"]["Code"] == "NoSuchEntity"
 
 
 def test_a_policy_is_detached_from_everything_before_it_is_deleted(iam):
-    """A boundary is attached to every principal a deploy made, so deleting it
+    """A boundary is attached to every principal an applied commit made, so deleting it
     means finding them all first."""
-    arn = iammod.create_policy(iam, name="enclavize-deploy-boundary", document=a_policy())
-    iammod.create_role(iam, name="enclavize-deploy", trust=policies.EC2_TRUST)
-    iam.attach_role_policy(RoleName="enclavize-deploy", PolicyArn=arn)
+    arn = iammod.create_policy(iam, name="enclavize-apply-boundary", document=a_policy())
+    iammod.create_role(iam, name="enclavize-apply", trust=policies.EC2_TRUST)
+    iam.attach_role_policy(RoleName="enclavize-apply", PolicyArn=arn)
     iammod.create_user(iam, name="enclavize-someone")
     iam.attach_user_policy(UserName="enclavize-someone", PolicyArn=arn)
 
@@ -125,7 +125,7 @@ def test_a_policy_is_detached_from_everything_before_it_is_deleted(iam):
 
 def test_extra_versions_are_removed_before_the_policy_is(iam):
     # IAM will not delete a policy that still has non-default versions.
-    arn = iammod.create_policy(iam, name="enclavize-deploy-boundary", document=a_policy(1))
+    arn = iammod.create_policy(iam, name="enclavize-apply-boundary", document=a_policy(1))
     iammod.set_policy_document(iam, policy_arn=arn, document=a_policy(2))
     iammod.set_policy_document(iam, policy_arn=arn, document=a_policy(3))
 

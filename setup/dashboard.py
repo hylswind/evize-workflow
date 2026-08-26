@@ -1,7 +1,7 @@
 """The dashboard: the only window into a sealed account.
 
 Nothing else reports progress. The operator watches for dashboard.{domain} to
-start answering, which is why it is built before the deploy machinery — its
+start answering, which is why it is built before the apply machinery — its
 being reachable at all proves DNS, the certificate and the CDN are working.
 
 The page itself lives in assets/dashboard as ordinary static files and is

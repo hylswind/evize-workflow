@@ -3,7 +3,7 @@
 Two orderings here are load-bearing and neither is obvious from reading the
 code in isolation: the proof bucket must be created before anything slow,
 because the workflow is blocked waiting for it; and the dashboard must exist
-before the deploy machinery, because it is the only progress signal an operator
+before the apply machinery, because it is the only progress signal an operator
 has.
 """
 
@@ -52,12 +52,14 @@ def journal(monkeypatch):
     monkeypatch.setattr(bringup.dashboard, "attach_cdn", step("dashboard_cdn", {"id": "E1"}))
     monkeypatch.setattr(bringup.dashboard, "mark", step("dashboard_mark"))
     monkeypatch.setattr(bringup.cdn, "await_deployed", step("cdn_deployed", True))
-    monkeypatch.setattr(bringup.deploy, "create_roles", step("deploy_roles", {
+    monkeypatch.setattr(bringup.apply, "create_roles", step("apply_roles", {
         "boundary_arn": "arn:b", "sfn_role_arn": "arn:sfn", "api_role_arn": "arn:api",
     }))
-    monkeypatch.setattr(bringup.deploy, "create_state_machine", step("deploy_sfn", "arn:sm"))
-    monkeypatch.setattr(bringup.deploy, "create_api", step("deploy_api", ("https://x/v1/deployments", "api1")))
-    monkeypatch.setattr(bringup.deploy, "tighten_boundary", step("tighten_boundary"))
+    monkeypatch.setattr(bringup.apply, "create_state_machine", step("apply_sfn", "arn:sm"))
+    monkeypatch.setattr(bringup.apply, "create_api", step("apply_api", ("https://x/v1/commits", "api1")))
+    monkeypatch.setattr(bringup.apply, "attach_custom_domain",
+                        step("apply_domain", "https://apply.example.com/v1/commits"))
+    monkeypatch.setattr(bringup.apply, "tighten_boundary", step("tighten_boundary"))
     monkeypatch.setattr(bringup.proof, "attach_cdn", step("proof_cdn", {"id": "E2"}))
     monkeypatch.setattr(bringup.proof, "await_and_seal", step("proof_seal", True))
     return events
@@ -105,13 +107,21 @@ def test_the_registrar_is_pointed_at_the_new_zone_before_the_certificate_issues(
     assert journal.index("update_ns") < journal.index("cert_issued")
 
 
-def test_the_deploy_machinery_is_built_during_the_certificate_wait(journal):
+def test_the_apply_machinery_is_built_during_the_certificate_wait(journal):
     """It needs only the account and the bucket names, so waiting for a
     certificate first would waste its whole duration."""
     run()
     cert = journal.index("cert_issued")
-    for step_name in ("deploy_roles", "deploy_sfn", "deploy_api"):
+    for step_name in ("apply_roles", "apply_sfn", "apply_api"):
         assert journal.index(step_name) < cert, step_name
+
+
+def test_the_apply_endpoint_waits_for_the_certificate(journal):
+    """A custom domain is rejected without one. This is why the API itself is
+    built during the certificate wait but its public name is not."""
+    run()
+    assert journal.index("apply_api") < journal.index("cert_issued")
+    assert journal.index("cert_issued") < journal.index("apply_domain")
 
 
 def test_both_distributions_are_created_before_either_is_awaited(journal):
@@ -129,15 +139,15 @@ def test_both_distributions_are_actually_awaited(journal):
 
 def test_the_mailbox_is_killed_before_the_account_starts_serving(journal):
     run()
-    assert journal.index("records") < journal.index("deploy_api")
+    assert journal.index("records") < journal.index("apply_api")
 
 
-def test_proof_is_sealed_only_after_the_deploy_path_exists(journal):
+def test_proof_is_sealed_only_after_the_apply_path_exists(journal):
     # Retiring the starter user is the last thing; nothing after it could
     # publish if it failed.
     run()
     assert journal.index("proof_seal") == len(journal) - 2  # followed only by the final mark
-    assert journal.index("deploy_api") < journal.index("proof_seal")
+    assert journal.index("apply_api") < journal.index("proof_seal")
 
 
 def test_the_full_order(journal):
@@ -154,12 +164,13 @@ def test_the_full_order(journal):
         # hand over the domain, then fill the wait with work that does not need
         # the certificate
         "update_ns",
-        "deploy_roles",
-        "deploy_sfn",
-        "deploy_api",
+        "apply_roles",
+        "apply_sfn",
+        "apply_api",
         "dashboard_mark",
         "cert_issued",
-        # both sites, deploying at the same time
+        # everything the certificate was blocking
+        "apply_domain",
         "dashboard_cdn",
         "proof_cdn",
         "cdn_deployed",
@@ -278,7 +289,7 @@ def test_the_instance_destroys_itself_even_when_the_bring_up_fails(monkeypatch):
     monkeypatch.setattr(bringup.ec2, "terminate", lambda client, iid: terminated.append(iid))
     monkeypatch.setenv("ENCLAVIZE_DOMAIN", DOMAIN)
     monkeypatch.setenv("ENCLAVIZE_APP_REPO", APP_REPO)
-    monkeypatch.setenv("ENCLAVIZE_DEPLOY_API_KEY", "k")
+    monkeypatch.setenv("ENCLAVIZE_APPLY_API_KEY", "k")
 
     with pytest.raises(RuntimeError, match="boom"):
         bringup.main()
@@ -291,7 +302,7 @@ def test_a_failure_to_self_terminate_does_not_mask_the_real_error(monkeypatch, c
     monkeypatch.setattr(bringup, "instance_id", lambda: (_ for _ in ()).throw(OSError("no imds")))
     monkeypatch.setenv("ENCLAVIZE_DOMAIN", DOMAIN)
     monkeypatch.setenv("ENCLAVIZE_APP_REPO", APP_REPO)
-    monkeypatch.setenv("ENCLAVIZE_DEPLOY_API_KEY", "k")
+    monkeypatch.setenv("ENCLAVIZE_APPLY_API_KEY", "k")
 
     with pytest.raises(RuntimeError, match="original"):
         bringup.main()

@@ -1,4 +1,4 @@
-"""The deploy API.
+"""The apply API.
 
 A REST API rather than an HTTP API, because only REST supports API keys and the
 key is the whole access control story here.
@@ -130,12 +130,56 @@ def attach_key_to_plan(apigw, *, name: str, api_id: str, stage: str, key_id: str
     return plan_id
 
 
+def create_custom_domain(apigw, *, host: str, certificate_arn: str) -> dict:
+    """A name of our own in front of the API. Returns the Route 53 alias target.
+
+    Regional rather than edge-optimized, which the API itself already is: the
+    endpoint types have to match, and an edge domain would build a CloudFront
+    distribution of its own and spend half an hour propagating. Regional is
+    immediate and its certificate is the same us-east-1 one everything else
+    uses.
+    """
+    created = apigw.create_domain_name(
+        domainName=host,
+        regionalCertificateArn=certificate_arn,
+        endpointConfiguration={"types": ["REGIONAL"]},
+        securityPolicy="TLS_1_2",
+    )
+    return {
+        "target_dns": created["regionalDomainName"],
+        "target_zone": created["regionalHostedZoneId"],
+    }
+
+
+def map_base_path(apigw, *, host: str, api_id: str, stage: str, base_path: str) -> None:
+    """Put the stage under a path on the custom domain.
+
+    base_path is passed explicitly rather than left out: omitting it maps the
+    stage at the root and the stage name vanishes from the URL, which would
+    leave no room for a second one later.
+    """
+    apigw.create_base_path_mapping(
+        domainName=host, restApiId=api_id, stage=stage, basePath=base_path
+    )
+
+
 def invoke_url(*, api_id: str, region: str, stage: str, path: str) -> str:
+    """The generated endpoint. Still the truth, but nobody outside can read it:
+    the account is sealed, so the custom domain is how anyone reaches this."""
     return f"https://{api_id}.execute-api.{region}.amazonaws.com/{stage}/{path}"
+
+
+def public_url(*, host: str, stage: str, path: str) -> str:
+    """The endpoint an operator can work out from the domain alone."""
+    return f"https://{host}/{stage}/{path}"
 
 
 def delete_api(apigw, api_id: str) -> None:
     apigw.delete_rest_api(restApiId=api_id)
+
+
+def delete_custom_domain(apigw, host: str) -> None:
+    apigw.delete_domain_name(domainName=host)
 
 
 def delete_usage_plan(apigw, *, plan_id: str, key_id: str = None) -> None:

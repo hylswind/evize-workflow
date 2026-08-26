@@ -99,7 +99,7 @@ def test_the_real_setup_userdata_is_accepted(ec2, ssm, iam, resources, launched)
     try:
         script = userdata.build_setup_userdata(
             self_repo="acme/enclavize-workflow", self_sha="a" * 40, region="us-east-1",
-            domain="example.com", app_repo="acme/app", deploy_api_key="k" * 32,
+            domain="example.com", app_repo="acme/app", apply_api_key="k" * 32,
             go_param=resources.go_param,
         )
         instance_id = ec2mod.launch(

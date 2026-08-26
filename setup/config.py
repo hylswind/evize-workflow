@@ -8,6 +8,7 @@ the proof handover work.
 from dataclasses import dataclass, replace
 
 from enclavize.logic.naming import (  # re-exported: the cross-phase contract
+    apply_host,
     dashboard_bucket_name,
     dashboard_host,
     proof_bucket_name,
@@ -44,8 +45,8 @@ STATUS_KEY = "status.json"
 # what makes the account's root email address dead.
 NULL_MX_VALUE = "0 ."
 
-DEPLOY_API_PATH = "deployments"
-DEPLOY_STAGE = "v1"
+APPLY_API_PATH = "commits"
+APPLY_STAGE = "v1"
 COMMIT_PATTERN = "^[0-9a-f]{40}$"
 
 
@@ -54,32 +55,32 @@ class Resources:
     prefix: str = "enclavize-"
     admin_role: str = "enclavize-admin"
     starter_user: str = "enclavize-starter"
-    deploy_role: str = "enclavize-deploy"
-    deploy_boundary: str = "enclavize-deploy-boundary"
-    deploy_sfn_role: str = "enclavize-deploy-sfn"
-    deploy_api_role: str = "enclavize-deploy-api"
-    deploy_state_machine: str = "enclavize-deploy"
-    deploy_api_name: str = "enclavize-deploy-api"
+    apply_role: str = "enclavize-apply"
+    apply_boundary: str = "enclavize-apply-boundary"
+    apply_sfn_role: str = "enclavize-apply-sfn"
+    apply_api_role: str = "enclavize-apply-api"
+    apply_state_machine: str = "enclavize-apply"
+    apply_api_name: str = "enclavize-apply-api"
 
     def with_prefix(self, prefix: str) -> "Resources":
         renamed = {}
         for field_name in (
             "admin_role",
             "starter_user",
-            "deploy_role",
-            "deploy_boundary",
-            "deploy_sfn_role",
-            "deploy_api_role",
-            "deploy_state_machine",
-            "deploy_api_name",
+            "apply_role",
+            "apply_boundary",
+            "apply_sfn_role",
+            "apply_api_role",
+            "apply_state_machine",
+            "apply_api_name",
         ):
             current = getattr(self, field_name)
             renamed[field_name] = prefix + current[len(self.prefix):] if current.startswith(self.prefix) else prefix + current
         renamed["prefix"] = prefix
         return replace(self, **renamed)
 
-    def deploy_boundary_arn(self, account_id: str) -> str:
-        return f"arn:aws:iam::{account_id}:policy/{self.deploy_boundary}"
+    def apply_boundary_arn(self, account_id: str) -> str:
+        return f"arn:aws:iam::{account_id}:policy/{self.apply_boundary}"
 
 
 RESOURCES = Resources()
@@ -91,4 +92,5 @@ __all__ = [
     "dashboard_bucket_name",
     "dashboard_host",
     "proof_host",
+    "apply_host",
 ]

@@ -17,14 +17,14 @@ from enclavize.logic import policies
 
 PROOF = f"enclavize-proof-{ACCOUNT_ID}"
 DASHBOARD = f"enclavize-dashboard-{ACCOUNT_ID}"
-BOUNDARY_ARN = f"arn:aws:iam::{ACCOUNT_ID}:policy/enclavize-deploy-boundary"
+BOUNDARY_ARN = f"arn:aws:iam::{ACCOUNT_ID}:policy/enclavize-apply-boundary"
 
 
 def boundary_document(protected=None):
-    return policies.deploy_boundary_policy(
+    return policies.apply_boundary_policy(
         account_id=ACCOUNT_ID, region=REGION, resource_prefix="enclavize-",
         proof_bucket=PROOF, dashboard_bucket=DASHBOARD, domain="example.com",
-        hosted_zone_id="Z1EXAMPLE", state_machine="enclavize-deploy", protected=protected,
+        hosted_zone_id="Z1EXAMPLE", state_machine="enclavize-apply", protected=protected,
     )
 
 
@@ -42,8 +42,8 @@ def inline_documents():
             region=REGION, account_id=ACCOUNT_ID, go_param=GO_PARAM, proof_bucket=PROOF
         ),
         "console-self-service": policies.console_self_service_policy(account_id=ACCOUNT_ID),
-        "deploy-role": policies.deploy_role_policy(boundary_arn=BOUNDARY_ARN),
-        "pass-role": policies.pass_role_policy(account_id=ACCOUNT_ID, role_name="enclavize-deploy"),
+        "apply-role": policies.apply_role_policy(boundary_arn=BOUNDARY_ARN),
+        "pass-role": policies.pass_role_policy(account_id=ACCOUNT_ID, role_name="enclavize-apply"),
     }
 
 
@@ -57,7 +57,7 @@ def test_iam_accepts_every_inline_policy(iam, name):
 
 def test_iam_accepts_the_permission_boundary(iam):
     document = boundary_document()
-    iam.create_policy(PolicyName="enclavize-deploy-boundary", PolicyDocument=json.dumps(document))
+    iam.create_policy(PolicyName="enclavize-apply-boundary", PolicyDocument=json.dumps(document))
 
 
 def test_iam_accepts_the_trust_policies(iam):

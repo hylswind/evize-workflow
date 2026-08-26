@@ -1,7 +1,7 @@
-"""The state machine behind the deploy API.
+"""The state machine behind the apply API.
 
 It is Express and invoked synchronously, which is only viable because it does
-one quick thing: launch an instance. It never waits for the deploy to finish —
+one quick thing: launch an instance. It never waits for the commit to finish —
 that would blow through both the five-minute Express ceiling and API Gateway's
 29-second integration timeout. Progress is watched on the dashboard instead.
 """

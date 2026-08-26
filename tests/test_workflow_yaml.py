@@ -67,7 +67,7 @@ def test_the_secrets_are_the_five_the_run_needs(workflow):
         "ROOT_KEY_ID",
         "ROOT_SECRET",
         "TRANSFER_PASSWORD",
-        "DEPLOY_API_KEY",
+        "APPLY_API_KEY",
         "CONSOLE_ZIP_PASSWORD",
     }
 
@@ -103,7 +103,7 @@ def test_the_run_is_told_which_commit_it_is(steps):
 def test_every_secret_reaches_the_run(steps):
     seal = steps[step_index(steps, "python -u -m workflow")]
     env = " ".join(seal["env"].values())
-    for secret in ("ROOT_KEY_ID", "ROOT_SECRET", "TRANSFER_PASSWORD", "DEPLOY_API_KEY"):
+    for secret in ("ROOT_KEY_ID", "ROOT_SECRET", "TRANSFER_PASSWORD", "APPLY_API_KEY"):
         assert f"secrets.{secret}" in env
 
 

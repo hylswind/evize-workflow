@@ -1,7 +1,7 @@
-"""Identities: the ones enclavize leaves behind, and the ones deploys may mint.
+"""Identities: the ones enclavize leaves behind, and the ones an apply may mint.
 
 Used by both phases — phase A creates the enclave identities and deletes the
-root key, phase B creates the deploy role and later deletes the starter user.
+root key, phase B creates the apply role and later deletes the starter user.
 All names arrive as arguments so a test can work under its own prefix.
 """
 
@@ -78,7 +78,7 @@ def create_login_profile(iam, *, user: str, password: str, reset_required: bool 
 def create_policy(iam, *, name: str, document: dict, description: str = "") -> str:
     """Create a customer-managed policy, returning its ARN.
 
-    Used for the deploy permission boundary, which has to be a standalone policy
+    Used for the apply permission boundary, which has to be a standalone policy
     so it can be named in a PermissionsBoundary condition.
     """
     try:

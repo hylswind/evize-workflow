@@ -12,8 +12,10 @@ The identities enclavize leaves behind are deliberately narrow:
   Describe, so this identity can see that a bucket or a table is there and
   cannot read a single object, secret or row out of it.
 - admin role: full power, assumable only by EC2 — used by the setup instance and
-  then left dormant, since the deploy boundary forbids passing it.
+  then left dormant, since the apply boundary forbids passing it.
 """
+
+from enclavize.logic import naming
 
 ADMIN_MANAGED_POLICY = "arn:aws:iam::aws:policy/AdministratorAccess"
 BILLING_MANAGED_POLICY = "arn:aws:iam::aws:policy/job-function/Billing"
@@ -108,16 +110,17 @@ def console_self_service_policy(*, account_id: str) -> dict:
     }
 
 
-def deploy_machinery_denial(*, region: str, account_id: str, state_machine: str, protected=None) -> dict:
-    """Keep deploys off the enclave's own API, workflow and distributions.
+def apply_machinery_denial(*, region: str, account_id: str, state_machine: str, domain: str,
+                           protected=None) -> dict:
+    """Keep applications off the enclave's own API, workflow and distributions.
 
     Named resources where they are known, and the whole service where they are
     not. The distinction matters: denying `apigateway:*` outright also stops the
     application from ever having an API of its own, which is collateral rather
     than intent. `protected` carries the ARNs that only exist once the machinery
     has been built, so the boundary is created service-wide and narrowed in
-    place afterwards — tightening late is safe, since nothing can deploy until
-    setup has finished.
+    place afterwards — tightening late is safe, since nothing can be applied
+    until setup has finished.
     """
     protected = protected or {}
     api_id = protected.get("api_id")
@@ -125,16 +128,22 @@ def deploy_machinery_denial(*, region: str, account_id: str, state_machine: str,
 
     if not api_id and not distributions:
         return {
-            "Sid": "CannotRewriteTheDeployMachinery",
+            "Sid": "CannotRewriteTheApplyMachinery",
             "Effect": "Deny",
             "Action": ["apigateway:*", "states:*", "cloudfront:*"],
             "Resource": "*",
         }
 
+    apply_host = naming.apply_host(domain)
     resources = [
-        # The state machine's name is fixed, so this one is known from the start.
+        # Both names are fixed, so these are known from the start — unlike the
+        # API's generated id. Taking the custom domain would let an application
+        # answer at apply.{domain} in the enclave's place, collecting the API
+        # key out of the header of every request meant for the real one.
         f"arn:aws:states:{region}:{account_id}:stateMachine:{state_machine}",
         f"arn:aws:states:{region}:{account_id}:execution:{state_machine}:*",
+        f"arn:aws:apigateway:{region}::/domainnames/{apply_host}",
+        f"arn:aws:apigateway:{region}::/domainnames/{apply_host}/*",
     ]
     if api_id:
         resources += [
@@ -145,14 +154,14 @@ def deploy_machinery_denial(*, region: str, account_id: str, state_machine: str,
         f"arn:aws:cloudfront::{account_id}:distribution/{did}" for did in distributions
     ]
     return {
-        "Sid": "CannotRewriteTheDeployMachinery",
+        "Sid": "CannotRewriteTheApplyMachinery",
         "Effect": "Deny",
         "Action": ["apigateway:*", "states:*", "cloudfront:*"],
         "Resource": resources,
     }
 
 
-def deploy_boundary_policy(
+def apply_boundary_policy(
     *,
     account_id: str,
     region: str,
@@ -164,14 +173,15 @@ def deploy_boundary_policy(
     state_machine: str,
     protected=None,
 ) -> dict:
-    """The ceiling for everything the deploy path creates.
+    """The ceiling for everything an applied commit creates.
 
-    Deploys get broad power to build the application, but the enclave's own
-    machinery is fenced off, and — critically — the boundary cannot be removed
-    or swapped, so a principal the deploy role creates can never exceed it.
+    An applied commit gets broad power to build whatever the application needs,
+    but the enclave's own machinery is fenced off, and — critically — the
+    boundary cannot be removed or swapped, so a principal the apply role creates
+    can never exceed it.
     """
     iam_arn = f"arn:aws:iam::{account_id}"
-    boundary_arn = f"{iam_arn}:policy/{resource_prefix}deploy-boundary"
+    boundary_arn = f"{iam_arn}:policy/{resource_prefix}apply-boundary"
     enclave_iam = [
         f"{iam_arn}:role/{resource_prefix}*",
         f"{iam_arn}:user/{resource_prefix}*",
@@ -217,10 +227,13 @@ def deploy_boundary_policy(
                 ],
             },
             {
-                # These two names are the enclave's own: repointing proof.
-                # would serve a statement of the deploy's choosing under the
-                # enclave's name, and dashboard. is the only window into the
-                # account. Everything else in the zone is the application's.
+                # These three names are the enclave's own. Repointing proof.
+                # would serve a statement of the application's choosing under
+                # the enclave's name; dashboard. is the only window into the
+                # account; and apply. is the way in, so redirecting it would
+                # hand every apply request — API key header and all — to
+                # whatever answered instead. Everything else in the zone is the
+                # application's.
                 "Sid": "CannotTouchTheEnclavesOwnNames",
                 "Effect": "Deny",
                 "Action": "route53:ChangeResourceRecordSets",
@@ -229,8 +242,9 @@ def deploy_boundary_policy(
                     "ForAnyValue:StringEquals": {
                         # Lowercase, no trailing dot, as the key is normalised.
                         "route53:ChangeResourceRecordSetsNormalizedRecordNames": [
-                            f"dashboard.{domain}".lower().rstrip("."),
-                            f"proof.{domain}".lower().rstrip("."),
+                            naming.dashboard_host(domain).lower().rstrip("."),
+                            naming.proof_host(domain).lower().rstrip("."),
+                            naming.apply_host(domain).lower().rstrip("."),
                         ]
                     }
                 },
@@ -270,20 +284,21 @@ def deploy_boundary_policy(
                     }
                 },
             },
-            deploy_machinery_denial(
+            apply_machinery_denial(
                 region=region,
                 account_id=account_id,
                 state_machine=state_machine,
+                domain=domain,
                 protected=protected,
             ),
             {
                 # The rule that makes the fence hold at any depth. It lives in
-                # the boundary rather than in the deploy role's own policy so
+                # the boundary rather than in the apply role's own policy so
                 # that every principal carrying the boundary inherits it: a role
-                # a deploy creates can only create further principals that also
-                # carry it. In the role's policy alone this would hold for one
-                # hop, and the principal created there could mint an unbounded
-                # one.
+                # an applied commit creates can only create further principals
+                # that also carry it. In the role's policy alone this would hold
+                # for one hop, and the principal created there could mint an
+                # unbounded one.
                 "Sid": "EveryPrincipalMintedHereKeepsTheBoundary",
                 "Effect": "Deny",
                 "Action": ["iam:CreateRole", "iam:CreateUser"],
@@ -317,7 +332,7 @@ def deploy_boundary_policy(
     }
 
 
-def deploy_role_policy(*, boundary_arn: str) -> dict:
+def apply_role_policy(*, boundary_arn: str) -> dict:
     """Defence in depth, and nothing else.
 
     The grant is AdministratorAccess, attached as a managed policy — identical
@@ -344,7 +359,7 @@ def deploy_role_policy(*, boundary_arn: str) -> dict:
 
 
 def pass_role_policy(*, account_id: str, role_name: str) -> dict:
-    """Allow passing exactly one role — the deploy instance role."""
+    """Allow passing exactly one role — the apply instance role."""
     return {
         "Version": "2012-10-17",
         "Statement": [

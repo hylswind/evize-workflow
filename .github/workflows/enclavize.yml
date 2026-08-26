@@ -22,7 +22,7 @@ on:
         required: true
         type: string
       repo:
-        description: the application repo this account will deploy (owner/name)
+        description: the application repo whose commits this account can apply (owner/name)
         required: true
         type: string
       bypass_event_check:
@@ -42,7 +42,7 @@ on:
         required: true
       TRANSFER_PASSWORD:
         required: true
-      DEPLOY_API_KEY:
+      APPLY_API_KEY:
         required: true
       CONSOLE_ZIP_PASSWORD:
         required: true
@@ -94,7 +94,7 @@ jobs:
           ENCLAVIZE_ROOT_KEY: ${{ secrets.ROOT_KEY_ID }}
           ENCLAVIZE_ROOT_SECRET: ${{ secrets.ROOT_SECRET }}
           ENCLAVIZE_TRANSFER_PASSWORD: ${{ secrets.TRANSFER_PASSWORD }}
-          ENCLAVIZE_DEPLOY_API_KEY: ${{ secrets.DEPLOY_API_KEY }}
+          ENCLAVIZE_APPLY_API_KEY: ${{ secrets.APPLY_API_KEY }}
           ENCLAVIZE_DOMAIN: ${{ inputs.domain }}
           ENCLAVIZE_START: ${{ inputs.start }}
           ENCLAVIZE_REPO: ${{ inputs.repo }}

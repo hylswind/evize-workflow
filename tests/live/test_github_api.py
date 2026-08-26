@@ -42,7 +42,7 @@ def test_a_missing_repo_is_a_clean_failure():
 
 
 def test_a_path_can_be_confirmed_at_a_commit():
-    """The check a deploy makes before launching an instance to run setup.sh."""
+    """The check enclavize makes before launching an instance to run setup.sh."""
     github.require_path_at_sha(REPO, "main", "action.yml")
 
 

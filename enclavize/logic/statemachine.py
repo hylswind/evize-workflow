@@ -1,9 +1,9 @@
-"""The deploy state machine's definition, as data.
+"""The apply state machine's definition, as data.
 
 It does one thing: launch an instance that will clone the app and run it. It
-deliberately does not wait for the deploy to finish — an Express workflow tops
+deliberately does not wait for the commit to finish applying — an Express workflow tops
 out at five minutes and API Gateway's integration at 29 seconds, while a real
-deploy takes longer than both. Progress is watched on the dashboard instead.
+apply takes longer than both. Progress is watched on the dashboard instead.
 
 The user-data template is rendered by the state machine rather than baked in,
 so the commit reaches the instance without a Lambda in the path.
@@ -59,7 +59,7 @@ def build_definition(
     )
 
     return {
-        "Comment": "enclavize: launch one instance to deploy an application commit",
+        "Comment": "enclavize: launch one instance to apply a commit",
         "StartAt": "RenderUserData",
         "States": {
             "RenderUserData": {
@@ -96,14 +96,14 @@ def build_definition(
                 },
                 "Retry": [_PROFILE_RETRY],
                 "ResultPath": "$.launch",
-                "Next": "RecordDeploy",
+                "Next": "RecordApply",
             },
-            "RecordDeploy": {
+            "RecordApply": {
                 "Type": "Task",
                 "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
                 "Parameters": {
                     "Bucket": dashboard_bucket,
-                    "Key.$": "States.Format('deploys/{}.json', $.commit)",
+                    "Key.$": "States.Format('applies/{}.json', $.commit)",
                     "ContentType": "application/json",
                     "Body": {
                         "commit.$": "$.commit",

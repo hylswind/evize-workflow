@@ -63,8 +63,8 @@ class Resources:
     event_reader_user: str = "enclavize-event-reader"
     starter_user: str = "enclavize-starter"
     console_user: str = "enclavize-console"
-    deploy_role: str = "enclavize-deploy"
-    deploy_boundary: str = "enclavize-deploy-boundary"
+    apply_role: str = "enclavize-apply"
+    apply_boundary: str = "enclavize-apply-boundary"
     instance_name_tag: str = "enclavize-instance"
     signin_lock_vpc_tag: str = "enclavize-signin-lock-vpc"
     signin_lock_vpc_cidr: str = "10.255.0.0/28"
@@ -78,8 +78,8 @@ class Resources:
             "event_reader_user",
             "starter_user",
             "console_user",
-            "deploy_role",
-            "deploy_boundary",
+            "apply_role",
+            "apply_boundary",
             "instance_name_tag",
             "signin_lock_vpc_tag",
         ):
@@ -96,8 +96,8 @@ class Resources:
     def console_user_arn(self, account_id: str) -> str:
         return f"arn:aws:iam::{account_id}:user/{self.console_user}"
 
-    def deploy_boundary_arn(self, account_id: str) -> str:
-        return f"arn:aws:iam::{account_id}:policy/{self.deploy_boundary}"
+    def apply_boundary_arn(self, account_id: str) -> str:
+        return f"arn:aws:iam::{account_id}:policy/{self.apply_boundary}"
 
 
 RESOURCES = Resources()

@@ -6,9 +6,9 @@
   program's first instruction cannot run before the account is sealed. There is
   no shell contract between this script and the program: both are enclavize, so
   it invokes the module directly.
-- deploy: launched later by the deploy state machine. Clones the APP repo at a
+- apply: launched later by the apply state machine. Clones the APP repo at a
   commit and runs its setup.sh, which is the one interface enclavize requires of
-  a deployed application.
+  an application.
 
 Every interpolated value is single-quoted, and secrets are exported only after
 `set +x` so they never reach the console log (get-console-output is readable by
@@ -28,12 +28,12 @@ export AWS_DEFAULT_REGION={region}
 export ENCLAVIZE_REGION={region}
 export ENCLAVIZE_DOMAIN={domain}
 export ENCLAVIZE_APP_REPO={app_repo}
-export ENCLAVIZE_DEPLOY_API_KEY={deploy_api_key}
+export ENCLAVIZE_APPLY_API_KEY={apply_api_key}
 until aws ssm get-parameter --name {go_param} >/dev/null 2>&1; do sleep 30; done
 exec python3 -m setup
 """
 
-_DEPLOY_TEMPLATE = r"""#!/bin/bash
+_APPLY_TEMPLATE = r"""#!/bin/bash
 set -euxo pipefail
 dnf install -y git
 rm -rf /opt/app
@@ -63,7 +63,7 @@ def build_setup_userdata(
     region: str,
     domain: str,
     app_repo: str,
-    deploy_api_key: str,
+    apply_api_key: str,
     go_param: str,
 ) -> str:
     """User-data for the instance that brings the sealed account up.
@@ -78,12 +78,12 @@ def build_setup_userdata(
         region=region,
         domain=_shquote(domain),
         app_repo=_shquote(app_repo),
-        deploy_api_key=_shquote(deploy_api_key),
+        apply_api_key=_shquote(apply_api_key),
         go_param=go_param,
     )
 
 
-def build_deploy_userdata(
+def build_apply_userdata(
     *,
     app_repo: str,
     commit: str,
@@ -91,8 +91,8 @@ def build_deploy_userdata(
     domain: str,
     entrypoint: str = APP_ENTRYPOINT,
 ) -> str:
-    """User-data for a deploy instance: clone the app at a commit and run it."""
-    return _DEPLOY_TEMPLATE.format(
+    """User-data for an apply instance: clone the app at a commit and run it."""
+    return _APPLY_TEMPLATE.format(
         repo=app_repo,
         commit=commit,
         region=region,

@@ -1,7 +1,7 @@
 """enclavize/aws/iam.py against real IAM.
 
 Used by four different places — creating the enclave identities, deleting root's
-key, building the deploy roles, and retiring the starter user — so verifying it
+key, building the apply roles, and retiring the starter user — so verifying it
 once covers all of them.
 
 What only real IAM can answer: whether the managed policy ARNs exist, whether
@@ -17,7 +17,7 @@ from botocore.exceptions import ClientError
 from enclavize.aws import iam as iammod
 from enclavize.logic import policies
 from setup import config as setup_config
-from setup import deploy as setup_deploy
+from setup import apply as setup_apply
 
 pytestmark = pytest.mark.aws
 
@@ -29,10 +29,10 @@ def boundary_for(resources, account_id):
     hand here would go stale the moment the policy's signature changed and
     nothing would say so until someone ran them against an account.
     """
-    # The boundary belongs to phase B, whose Resources carries the deploy
+    # The boundary belongs to phase B, whose Resources carries the apply
     # names; the fixture hands out phase A's. Same prefix either way, so the
     # test's own namespace is preserved.
-    return setup_deploy.boundary_document(
+    return setup_apply.boundary_document(
         res=setup_config.RESOURCES.with_prefix(resources.prefix),
         account_id=account_id,
         region="us-east-1",
@@ -163,24 +163,24 @@ def test_iam_accepts_the_permission_boundary(iam, resources, cleanup, account_id
     """Its conditions are the fence around the enclave; a rejected document
     would mean no fence at all."""
     arn = iammod.create_policy(
-        iam, name=resources.deploy_boundary,
+        iam, name=resources.apply_boundary,
         document=boundary_for(resources, account_id),
     )
     cleanup["policies"].append(arn)
-    assert arn.endswith(resources.deploy_boundary)
+    assert arn.endswith(resources.apply_boundary)
 
 
 def test_a_bounded_role_reports_its_boundary(iam, resources, cleanup, account_id):
     arn = iammod.create_policy(
-        iam, name=resources.deploy_boundary,
+        iam, name=resources.apply_boundary,
         document=boundary_for(resources, account_id),
     )
     cleanup["policies"].append(arn)
 
-    iammod.create_role(iam, name=resources.deploy_role, trust=policies.EC2_TRUST, boundary_arn=arn)
-    cleanup["roles"].append(resources.deploy_role)
+    iammod.create_role(iam, name=resources.apply_role, trust=policies.EC2_TRUST, boundary_arn=arn)
+    cleanup["roles"].append(resources.apply_role)
 
-    role = iam.get_role(RoleName=resources.deploy_role)["Role"]
+    role = iam.get_role(RoleName=resources.apply_role)["Role"]
     assert role["PermissionsBoundary"]["PermissionsBoundaryArn"] == arn
 
 
@@ -230,7 +230,7 @@ def test_deleting_a_user_clears_everything_that_would_block_it(iam, resources, c
 def test_creating_a_policy_twice_returns_the_same_arn(iam, resources, cleanup, account_id):
     """A re-run of the bring-up must not fail on an existing boundary."""
     document = boundary_for(resources, account_id)
-    first = iammod.create_policy(iam, name=resources.deploy_boundary, document=document)
+    first = iammod.create_policy(iam, name=resources.apply_boundary, document=document)
     cleanup["policies"].append(first)
 
-    assert iammod.create_policy(iam, name=resources.deploy_boundary, document=document) == first
+    assert iammod.create_policy(iam, name=resources.apply_boundary, document=document) == first

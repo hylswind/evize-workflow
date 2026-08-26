@@ -48,7 +48,7 @@ def resolve_repo_id(repo: str, *, token=None, opener=None) -> int:
 def require_path_at_sha(repo: str, ref: str, path: str, *, token=None, opener=None) -> None:
     """Fail unless `path` is a file in `repo` at `ref`.
 
-    Used at deploy time to check an app repo ships the setup.sh entrypoint
+    Used when a commit is applied, to check the app repo ships the setup.sh entrypoint
     before an instance is launched to run it.
     """
     body = _get(CONTENTS_API.format(repo=repo, path=path, ref=ref), token, opener)

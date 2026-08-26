@@ -97,7 +97,7 @@ def await_and_seal(s3_client, iam_client, *, bucket: str, res, log=print) -> boo
     if not statement_matches_bundle(s3_client, bucket=bucket):
         log("WARNING: the published bundle does not attest the published statement")
 
-    # Nothing in the account can write here afterwards: the deploy boundary
+    # Nothing in the account can write here afterwards: the apply boundary
     # denies the bucket outright, and no principal can assume the admin role.
     iam.delete_user(iam_client, user=res.starter_user)
     log(f"deleted {res.starter_user}; the proof can no longer be rewritten from inside")

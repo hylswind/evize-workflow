@@ -31,3 +31,13 @@ def dashboard_host(domain: str) -> str:
 
 def proof_host(domain: str) -> str:
     return f"proof.{domain}"
+
+
+def apply_host(domain: str) -> str:
+    """Where commits are applied.
+
+    A name of its own rather than the generated execute-api one, because the
+    generated one is unknowable from outside: the account is sealed, so nobody
+    can look it up. This name is derivable from the domain alone.
+    """
+    return f"apply.{domain}"

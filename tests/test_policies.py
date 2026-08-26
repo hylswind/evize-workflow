@@ -8,16 +8,16 @@ from enclavize.logic import policies
 PREFIX = "enclavize-"
 PROOF_BUCKET = "enclavize-proof-123456789012"
 DASHBOARD_BUCKET = "enclavize-dashboard-123456789012"
-BOUNDARY_ARN = f"arn:aws:iam::{ACCOUNT_ID}:policy/{PREFIX}deploy-boundary"
+BOUNDARY_ARN = f"arn:aws:iam::{ACCOUNT_ID}:policy/{PREFIX}apply-boundary"
 
 
 ZONE_ID = "Z1EXAMPLE"
 DOMAIN = "example.com"
-STATE_MACHINE = "enclavize-deploy"
+STATE_MACHINE = "enclavize-apply"
 
 
 def boundary(protected=None):
-    return policies.deploy_boundary_policy(
+    return policies.apply_boundary_policy(
         account_id=ACCOUNT_ID,
         region=REGION,
         resource_prefix=PREFIX,
@@ -105,7 +105,7 @@ def test_boundary_protects_proof_and_dashboard_buckets():
     assert f"arn:aws:s3:::{PROOF_BUCKET}" in resources
 
 
-def test_boundary_protects_the_deploy_machinery_from_itself():
+def test_boundary_protects_the_apply_machinery_from_itself():
     denied = actions_denied(boundary())
     assert {"apigateway:*", "states:*", "cloudfront:*"} <= denied
 
@@ -125,8 +125,8 @@ def test_boundary_cannot_be_swapped_for_a_weaker_one():
 def test_the_boundary_itself_forces_every_new_principal_to_carry_it():
     """This is what makes the fence hold at any depth.
 
-    In the deploy role's own policy alone it would hold for one hop: a role the
-    deploy created could then mint an unbounded one, and that principal would be
+    In the apply role's own policy alone it would hold for one hop: a role the
+    apply created could then mint an unbounded one, and that principal would be
     outside the enclave entirely. In the boundary, every principal carrying it
     inherits the rule.
     """
@@ -136,24 +136,24 @@ def test_the_boundary_itself_forces_every_new_principal_to_carry_it():
     assert minted[0]["Condition"]["StringNotEquals"]["iam:PermissionsBoundary"] == BOUNDARY_ARN
 
 
-def test_the_deploy_role_repeats_the_rule_as_defence_in_depth():
-    document = policies.deploy_role_policy(boundary_arn=BOUNDARY_ARN)
+def test_the_apply_role_repeats_the_rule_as_defence_in_depth():
+    document = policies.apply_role_policy(boundary_arn=BOUNDARY_ARN)
     denied = [s for s in statements(document, "Deny") if s["Sid"] == "OnlyMintBoundedPrincipals"]
     assert set(denied[0]["Action"]) == {"iam:CreateRole", "iam:CreateUser"}
     assert denied[0]["Condition"]["StringNotEquals"]["iam:PermissionsBoundary"] == BOUNDARY_ARN
 
 
-def test_the_deploy_role_grants_nothing_by_itself():
+def test_the_apply_role_grants_nothing_by_itself():
     # The grant is AdministratorAccess attached separately; this document only
     # constrains, so an edit here can never widen the role.
-    document = policies.deploy_role_policy(boundary_arn=BOUNDARY_ARN)
+    document = policies.apply_role_policy(boundary_arn=BOUNDARY_ARN)
     assert statements(document, "Allow") == []
 
 
-def test_pass_role_is_limited_to_the_deploy_role():
-    # Otherwise a deploy could hand itself the admin role and step outside.
-    document = policies.pass_role_policy(account_id=ACCOUNT_ID, role_name="enclavize-deploy")
-    assert document["Statement"][0]["Resource"] == f"arn:aws:iam::{ACCOUNT_ID}:role/enclavize-deploy"
+def test_pass_role_is_limited_to_the_apply_role():
+    # Otherwise an applied commit could hand itself the admin role and step outside.
+    document = policies.pass_role_policy(account_id=ACCOUNT_ID, role_name="enclavize-apply")
+    assert document["Statement"][0]["Resource"] == f"arn:aws:iam::{ACCOUNT_ID}:role/enclavize-apply"
 
 
 def test_cloudfront_bucket_policy_is_allow_only():
@@ -177,7 +177,8 @@ def test_ec2_trust_only_trusts_ec2():
 
 def test_the_enclaves_own_names_are_fully_protected():
     """Repointing proof.{domain} would serve a forged statement under the
-    enclave's own name."""
+    enclave's own name, and repointing apply.{domain} would collect the API key
+    out of every request meant for the real endpoint."""
     denied = [s for s in statements(boundary(), "Deny")
               if s["Sid"] == "CannotTouchTheEnclavesOwnNames"]
     assert denied[0]["Action"] == "route53:ChangeResourceRecordSets"
@@ -185,7 +186,7 @@ def test_the_enclaves_own_names_are_fully_protected():
     names = denied[0]["Condition"]["ForAnyValue:StringEquals"][
         "route53:ChangeResourceRecordSetsNormalizedRecordNames"
     ]
-    assert set(names) == {f"dashboard.{DOMAIN}", f"proof.{DOMAIN}"}
+    assert set(names) == {f"dashboard.{DOMAIN}", f"proof.{DOMAIN}", f"apply.{DOMAIN}"}
     # The apex is not here: it belongs to the application apart from its MX.
     assert DOMAIN not in names
 
@@ -227,7 +228,7 @@ def test_the_boundary_does_not_defend_the_mirrors_uptime():
 
 def test_protected_record_names_are_normalised():
     # The condition key is matched against lowercase names with no trailing dot.
-    document = policies.deploy_boundary_policy(
+    document = policies.apply_boundary_policy(
         account_id=ACCOUNT_ID, region=REGION, resource_prefix=PREFIX,
         proof_bucket=PROOF_BUCKET, dashboard_bucket=DASHBOARD_BUCKET,
         domain="Example.COM.", hosted_zone_id=ZONE_ID, state_machine=STATE_MACHINE,
@@ -258,7 +259,7 @@ def test_the_boundary_does_not_bother_with_organizations():
 
 def test_the_boundary_does_not_pretend_to_protect_cloudtrail():
     """The account has no trail — the audit reads Event history, which cannot be
-    switched off — and the audit is over before any deploy exists."""
+    switched off — and the audit is over before anything can be applied."""
     denied = actions_denied(boundary())
     assert not any(a.startswith("cloudtrail:") for a in denied)
 
@@ -270,7 +271,7 @@ def test_the_machinery_denial_starts_service_wide():
     # Before the API and distributions exist there are no ARNs to name, and the
     # stricter form is the safe one to start from.
     denied = [s for s in statements(boundary(), "Deny")
-              if s["Sid"] == "CannotRewriteTheDeployMachinery"]
+              if s["Sid"] == "CannotRewriteTheApplyMachinery"]
     assert denied[0]["Resource"] == "*"
 
 
@@ -279,7 +280,7 @@ def test_the_machinery_denial_narrows_to_named_resources():
     API, a workflow or a distribution of its own."""
     document = boundary(protected={"api_id": "abc123", "distribution_ids": ["E1", "E2"]})
     denied = [s for s in statements(document, "Deny")
-              if s["Sid"] == "CannotRewriteTheDeployMachinery"]
+              if s["Sid"] == "CannotRewriteTheApplyMachinery"]
     resources = denied[0]["Resource"]
 
     assert resources != "*"
@@ -289,9 +290,25 @@ def test_the_machinery_denial_narrows_to_named_resources():
     assert f"arn:aws:cloudfront::{ACCOUNT_ID}:distribution/E2" in resources
 
 
+def test_the_narrowed_boundary_still_holds_the_apply_endpoints_name():
+    """Taking the custom domain would let an application answer at
+    apply.{domain} in the enclave's place, reading the API key out of the header
+    of every request meant for the real one. Unlike the API's generated id, the
+    name is known from the start, so narrowing must not drop it."""
+    document = boundary(protected={"api_id": "abc123", "distribution_ids": ["E1"]})
+    denied = [s for s in statements(document, "Deny")
+              if s["Sid"] == "CannotRewriteTheApplyMachinery"]
+    resources = denied[0]["Resource"]
+    assert f"arn:aws:apigateway:{REGION}::/domainnames/apply.{DOMAIN}" in resources
+    # And its base path mappings, which are where an API is swapped underneath.
+    assert f"arn:aws:apigateway:{REGION}::/domainnames/apply.{DOMAIN}/*" in resources
+
+
 def test_a_narrowed_boundary_leaves_other_resources_of_those_services_alone():
     document = boundary(protected={"api_id": "abc123", "distribution_ids": ["E1"]})
     denied = [s for s in statements(document, "Deny")
-              if s["Sid"] == "CannotRewriteTheDeployMachinery"]
+              if s["Sid"] == "CannotRewriteTheApplyMachinery"]
     # An application's own API is not named, so it is not denied.
     assert not any("otherapi" in r for r in denied[0]["Resource"])
+    # Nor its own custom domains.
+    assert not any(f"/domainnames/www.{DOMAIN}" in r for r in denied[0]["Resource"])

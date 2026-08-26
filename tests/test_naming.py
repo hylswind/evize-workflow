@@ -33,6 +33,22 @@ def test_proof_and_dashboard_buckets_are_distinct():
 def test_public_hosts_are_subdomains_of_the_main_domain():
     assert naming.dashboard_host(DOMAIN) == "dashboard.example.com"
     assert naming.proof_host(DOMAIN) == "proof.example.com"
+    assert naming.apply_host(DOMAIN) == "apply.example.com"
+
+
+def test_the_three_public_hosts_are_distinct():
+    """They share one certificate and one hosted zone; a collision would have
+    two of them fighting over the same record."""
+    hosts = {naming.dashboard_host(DOMAIN), naming.proof_host(DOMAIN), naming.apply_host(DOMAIN)}
+    assert len(hosts) == 3
+
+
+def test_the_apply_endpoint_is_derivable_from_the_domain_alone():
+    """The whole reason it exists. The generated execute-api name is computed on
+    an instance that then terminates itself, inside an account with no console
+    and no credentials — so a value only that instance saw is a value nobody
+    has. This one needs no channel to reach the operator."""
+    assert naming.apply_host(DOMAIN) == f"apply.{DOMAIN}"
 
 
 def test_both_phases_import_the_same_function():

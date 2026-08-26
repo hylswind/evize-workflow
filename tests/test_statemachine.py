@@ -1,4 +1,4 @@
-"""The deploy state machine definition.
+"""The apply state machine definition.
 
 The escaping rules here come from the Amazon States Language spec: ' { } and \\
 are reserved inside an intrinsic invocation and each must be preceded by a
@@ -22,9 +22,9 @@ def definition():
         image_id="ami-1",
         instance_type="t3.small",
         subnet_id="subnet-1",
-        instance_profile="enclavize-deploy",
+        instance_profile="enclavize-apply",
         dashboard_bucket=DASHBOARD_BUCKET,
-        name_tag="enclavize-deploy",
+        name_tag="enclavize-apply",
     )
 
 
@@ -78,10 +78,10 @@ def test_the_script_stops_tracing_before_exporting_anything():
     assert expression.index("set +x") < expression.index("export ENCLAVIZE_COMMIT")
 
 
-def test_it_launches_with_the_bounded_deploy_profile():
+def test_it_launches_with_the_bounded_apply_profile():
     launch = definition()["States"]["LaunchInstance"]
     assert launch["Resource"] == "arn:aws:states:::aws-sdk:ec2:runInstances"
-    assert launch["Parameters"]["IamInstanceProfile"] == {"Name": "enclavize-deploy"}
+    assert launch["Parameters"]["IamInstanceProfile"] == {"Name": "enclavize-apply"}
     assert launch["Parameters"]["UserData.$"] == "$.userData"
 
 
@@ -92,25 +92,25 @@ def test_launching_retries_while_the_instance_profile_propagates():
     assert retry["IntervalSeconds"] <= 5
 
 
-def test_every_deploy_is_recorded_for_the_dashboard():
-    record = definition()["States"]["RecordDeploy"]
+def test_every_apply_is_recorded_for_the_dashboard():
+    record = definition()["States"]["RecordApply"]
     assert record["Resource"] == "arn:aws:states:::aws-sdk:s3:putObject"
     assert record["Parameters"]["Bucket"] == DASHBOARD_BUCKET
-    assert record["Parameters"]["Key.$"] == "States.Format('deploys/{}.json', $.commit)"
+    assert record["Parameters"]["Key.$"] == "States.Format('applies/{}.json', $.commit)"
     assert record["Parameters"]["Body"]["instanceId.$"] == "$.launch.Instances[0].InstanceId"
 
 
 def test_it_returns_as_soon_as_the_instance_exists():
-    """It must not wait for the deploy: Express tops out at five minutes and the
+    """It must not wait for the commit to finish: Express tops out at five minutes and the
     API integration at 29 seconds."""
     done = definition()["States"]["Done"]
     assert done["End"] is True
-    # "launched", not "deployed" — the instance has only just started.
+    # "launched", not "applied" — the instance has only just started.
     assert done["Parameters"]["status"] == "launched"
     assert done["Parameters"]["instanceId.$"] == "$.launch.Instances[0].InstanceId"
 
 
-def test_no_state_waits_on_the_deploy_finishing():
+def test_no_state_waits_on_the_apply_finishing():
     states = definition()["States"]
     assert not any(state["Type"] == "Wait" for state in states.values())
     # A .sync task would block until the work completed.
