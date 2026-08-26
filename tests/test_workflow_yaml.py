@@ -83,10 +83,22 @@ def test_the_permissions_are_what_signing_requires(workflow):
 def test_the_checkout_pins_enclavizes_own_commit(steps):
     """Otherwise the code that seals the account is not the attested code."""
     checkout = next(s for s in steps if str(s.get("uses", "")).startswith("actions/checkout"))
-    assert checkout["with"]["ref"] == "${{ github.job_workflow_sha }}"
+    assert checkout["with"]["ref"] == "${{ job.workflow_sha }}"
     # Left to itself, checkout would take the caller's tree.
     assert "repository" in checkout["with"]
     assert checkout["with"]["repository"] == "${{ steps.self.outputs.repo }}"
+
+
+def test_the_self_reference_is_refused_when_empty(steps):
+    """An empty ref does not fail on its own: actions/checkout with no
+    repository input falls back to github.repository, which inside a reusable
+    workflow is the caller. The run would seal the account with the caller's
+    code while the attestation named enclavize's — so the step checks."""
+    step = next(s for s in steps if s.get("id") == "self")
+    assert step["env"]["SELF_REF"] == "${{ job.workflow_ref }}"
+    assert step["env"]["SELF_SHA"] == "${{ job.workflow_sha }}"
+    for name in ("SELF_REF", "SELF_SHA"):
+        assert f'test -n "${name}"' in step["run"], f"{name} is used without being checked"
 
 
 def test_the_checkout_does_not_leave_a_token_behind(steps):
@@ -96,8 +108,8 @@ def test_the_checkout_does_not_leave_a_token_behind(steps):
 
 def test_the_run_is_told_which_commit_it_is(steps):
     seal = steps[step_index(steps, "python -u -m workflow")]
-    assert seal["env"]["ENCLAVIZE_SELF_REF"] == "${{ github.job_workflow_ref }}"
-    assert seal["env"]["ENCLAVIZE_SELF_SHA"] == "${{ github.job_workflow_sha }}"
+    assert seal["env"]["ENCLAVIZE_SELF_REF"] == "${{ job.workflow_ref }}"
+    assert seal["env"]["ENCLAVIZE_SELF_SHA"] == "${{ job.workflow_sha }}"
 
 
 def test_every_secret_reaches_the_run(steps):

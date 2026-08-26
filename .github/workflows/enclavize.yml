@@ -67,11 +67,20 @@ jobs:
 
       - name: work out which enclavize commit is running
         id: self
-        # Inside a reusable workflow github.repository is the caller, so the
-        # only way to learn enclavize's own repo is job_workflow_ref.
+        # Inside a reusable workflow github.repository is the caller, so the job
+        # context is the only way to learn enclavize's own repo and commit.
+        #
+        # Both are checked rather than trusted, because empty degrades
+        # dangerously: with no repository input actions/checkout falls back to
+        # github.repository and takes the caller's tree. The account would then
+        # be sealed by the caller's code while the attestation named enclavize's.
         env:
-          SELF_REF: ${{ github.job_workflow_ref }}
-        run: echo "repo=${SELF_REF%%/.github/*}" >> "$GITHUB_OUTPUT"
+          SELF_REF: ${{ job.workflow_ref }}
+          SELF_SHA: ${{ job.workflow_sha }}
+        run: |
+          test -n "$SELF_REF" || { echo "::error::job.workflow_ref is empty"; exit 1; }
+          test -n "$SELF_SHA" || { echo "::error::job.workflow_sha is empty"; exit 1; }
+          echo "repo=${SELF_REF%%/.github/*}" >> "$GITHUB_OUTPUT"
 
       - name: check out that exact commit
         # Not the caller's tree: the code that seals the account has to be the
@@ -79,7 +88,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ steps.self.outputs.repo }}
-          ref: ${{ github.job_workflow_sha }}
+          ref: ${{ job.workflow_sha }}
           persist-credentials: false
 
       - uses: actions/setup-python@v5
@@ -100,8 +109,8 @@ jobs:
           ENCLAVIZE_REPO: ${{ inputs.repo }}
           ENCLAVIZE_BYPASS_EVENT_CHECK: ${{ inputs.bypass_event_check }}
           ENCLAVIZE_BYPASS_DOMAIN_TRANSFER: ${{ inputs.bypass_domain_transfer }}
-          ENCLAVIZE_SELF_REF: ${{ github.job_workflow_ref }}
-          ENCLAVIZE_SELF_SHA: ${{ github.job_workflow_sha }}
+          ENCLAVIZE_SELF_REF: ${{ job.workflow_ref }}
+          ENCLAVIZE_SELF_SHA: ${{ job.workflow_sha }}
           ENCLAVIZE_CALLER_REPO: ${{ github.repository }}
           ENCLAVIZE_GH_TOKEN: ${{ github.token }}
         run: python -u -m workflow
