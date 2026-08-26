@@ -41,6 +41,12 @@ BUNDLE_KEY = "bundle.jsonl"
 INDEX_KEY = "index.html"
 STATUS_KEY = "status.json"
 
+STATUS_CACHE_CONTROL = "no-cache"
+"""The distribution's cache policy has a minimum TTL of one second, which it
+applies in place of no-cache — so this is a second of staleness rather than the
+policy's default day. A second is nothing; a day would outlast the bring-up it
+is meant to report on."""
+
 # RFC 7505: a single "." exchanger declares the domain accepts no mail, which is
 # what makes the account's root email address dead.
 NULL_MX_VALUE = "0 ."

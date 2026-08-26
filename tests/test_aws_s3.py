@@ -155,3 +155,29 @@ def test_delete_empties_a_versioned_bucket_first(s3):
     s3mod.delete_bucket(s3, BUCKET)
 
     assert s3mod.bucket_exists(s3, BUCKET) is False
+
+
+def test_an_object_can_say_how_long_it_may_be_cached():
+    """A distribution takes the answer from the object. Without one it uses its
+    cache policy's default, which is a day."""
+    recorded = {}
+
+    class Recorder:
+        def put_object(self, **kwargs):
+            recorded.update(kwargs)
+
+    s3mod.put_json(Recorder(), bucket="b", key="k", body=b"{}", cache_control="no-cache")
+    assert recorded["CacheControl"] == "no-cache"
+
+
+def test_an_object_that_says_nothing_sends_no_header():
+    """Most of what enclavize writes never changes, and a day of caching is
+    right for it — so the header is absent rather than set to a long value."""
+    recorded = {}
+
+    class Recorder:
+        def put_object(self, **kwargs):
+            recorded.update(kwargs)
+
+    s3mod.put_json(Recorder(), bucket="b", key="k", body=b"{}")
+    assert "CacheControl" not in recorded

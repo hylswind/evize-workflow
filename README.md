@@ -152,9 +152,15 @@ terminates itself, so nothing is left holding admin.
 
 ### Knowing when it is ready
 
-`https://dashboard.{domain}` answering is the signal that the bring-up has
-finished. Beside the page, `status.json` carries the same state in
-machine-readable form, so the wait can be polled rather than watched.
+Watch the account's two CloudFront distributions until both read **Deployed**,
+then open `https://dashboard.{domain}`. The page reports where the bring-up has
+got to, and `status.json` beside it carries the same state in machine-readable
+form.
+
+Wait for Deployed before opening it rather than refreshing while you wait. Until
+the distribution exists there is no address to answer at, and a resolver that
+asks early will remember that there wasn't one for a quarter of an hour after
+there is.
 
 ### Applying a commit
 

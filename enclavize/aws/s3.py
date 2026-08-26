@@ -86,13 +86,24 @@ def await_bucket(s3, bucket: str, *, poll_max: int, interval: int, sleep=time.sl
         sleep(interval)
 
 
-def put_json(s3, *, bucket: str, key: str, body: bytes, content_type: str = "application/json") -> None:
-    s3.put_object(Bucket=bucket, Key=key, Body=body, ContentType=content_type)
+def put_json(s3, *, bucket: str, key: str, body: bytes, content_type: str = "application/json",
+             cache_control: str = "") -> None:
+    """Write an object, optionally saying how long it may be cached.
+
+    A distribution in front of the bucket takes that from the object itself.
+    Without it the distribution falls back to its cache policy's default, which
+    for the managed caching policy is a day — right for content that never
+    changes, wrong for anything that reports progress.
+    """
+    extra = {"CacheControl": cache_control} if cache_control else {}
+    s3.put_object(Bucket=bucket, Key=key, Body=body, ContentType=content_type, **extra)
 
 
-def put_file(s3, *, bucket: str, key: str, path, content_type: str = "application/json") -> None:
+def put_file(s3, *, bucket: str, key: str, path, content_type: str = "application/json",
+             cache_control: str = "") -> None:
     with open(path, "rb") as handle:
-        put_json(s3, bucket=bucket, key=key, body=handle.read(), content_type=content_type)
+        put_json(s3, bucket=bucket, key=key, body=handle.read(),
+                 content_type=content_type, cache_control=cache_control)
 
 
 def object_exists(s3, *, bucket: str, key: str) -> bool:

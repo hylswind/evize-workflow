@@ -136,9 +136,17 @@ def attach_cdn(cf_client, s3_client, r53_client, *, bucket: str, host: str, zone
 
 
 def mark(s3_client, *, bucket: str, domain: str, state: str, proof: str = "pending") -> None:
+    """Record where the bring-up has got to.
+
+    The one file here that changes, and so the one that must not be cached like
+    the rest. Everything beside it is written once and never again, where a
+    day's caching is exactly right; this would answer with a state the account
+    left behind hours ago, which is worse than not answering at all.
+    """
     s3.put_json(
         s3_client,
         bucket=bucket,
         key=config.STATUS_KEY,
         body=render_status(domain=domain, state=state, proof=proof),
+        cache_control=config.STATUS_CACHE_CONTROL,
     )

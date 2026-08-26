@@ -116,6 +116,21 @@ def test_the_apply_machinery_is_built_during_the_certificate_wait(journal):
         assert journal.index(step_name) < cert, step_name
 
 
+def test_the_state_it_reports_is_not_cached_like_the_rest():
+    """status.json is the only file here that changes. Cached like the static
+    page beside it, the one window into the account would answer with a state
+    the bring-up left behind hours earlier."""
+    recorded = {}
+
+    class Recorder:
+        def put_object(self, **kwargs):
+            recorded.update(kwargs)
+
+    dashboard.mark(Recorder(), bucket="b", domain=DOMAIN, state="complete")
+    assert recorded["Key"] == config.STATUS_KEY
+    assert recorded["CacheControl"] == config.STATUS_CACHE_CONTROL
+
+
 def test_the_apply_endpoint_waits_for_the_certificate(journal):
     """A custom domain is rejected without one. This is why the API itself is
     built during the certificate wait but its public name is not."""

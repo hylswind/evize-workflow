@@ -8,6 +8,9 @@ that requires the registrar to have been repointed, a certificate to have been
 issued through DNS validation, and a distribution to have deployed — none of
 which any offline test can reach, and all of which happen inside an account no
 human can log into.
+
+That is an assertion, not the wait. Waiting on it would make this suite depend
+on a resolver and a CDN to learn something the account can be asked directly.
 """
 
 import json
@@ -19,6 +22,7 @@ from harness import STATE_FILE, fetch, poll, verify_attestation
 
 from enclavize.aws import dns as dnsmod
 from enclavize.aws import domains as domainsmod
+from enclavize.aws import s3 as s3mod
 from enclavize.logic import naming
 from setup import apply as setup_apply
 from setup import config as setup_config
@@ -42,27 +46,43 @@ def state():
 
 
 @pytest.fixture(scope="session", autouse=True)
-def status(profile):
-    """Block until the bring-up says it is done.
+def status(rescue, account_id, profile):
+    """Block until the bring-up has actually finished.
 
-    status.json is the only thing a sealed account tells anyone. Reaching it
-    proves DNS, the certificate and the CDN all work, so it is both the wait and
-    the assertion.
+    Read from the bucket rather than from the public name. This suite holds
+    credentials; an operator does not, and conflating the two makes the wait
+    depend on DNS and a CDN, neither of which has anything to say about whether
+    the account is ready. Whether the public path works is asserted separately,
+    where a failure means what it says.
+
+    The wait ends only once the instance has gone too. `complete` is written
+    while it is still shutting itself down, and this suite moves on to stage 3
+    the moment the wait returns — far quicker than the person the ordering was
+    written for.
 
     Autouse because every assertion in this file needs the bring-up finished,
     and without it a `-k` selecting one test would race the account.
     """
-    url = f"https://{naming.dashboard_host(profile.domain)}/{setup_config.STATUS_KEY}"
+    bucket = naming.dashboard_bucket_name(account_id)
+    s3_client, ec2_client = rescue.client("s3"), rescue.client("ec2")
 
-    def complete():
-        code, body = fetch(url)
-        if code != 200:
+    def finished():
+        document = json.loads(s3mod.get_bytes(s3_client, bucket=bucket,
+                                              key=setup_config.STATUS_KEY))
+        if document.get("state") != "complete":
             return None
-        document = json.loads(body)
-        return document if document.get("state") == "complete" else None
+        live = [
+            instance
+            for reservation in ec2_client.describe_instances(
+                Filters=[{"Name": "tag:Name", "Values": [RESOURCES.instance_name_tag]},
+                         {"Name": "instance-state-name", "Values": ["pending", "running"]}],
+            )["Reservations"]
+            for instance in reservation["Instances"]
+        ]
+        return document if not live else None
 
-    return poll(complete, timeout=profile.timeout("bringup"), interval=30,
-                what=f"{url} to report state=complete")
+    return poll(finished, timeout=profile.timeout("bringup"), interval=30,
+                what="the bring-up to finish and the setup instance to go")
 
 
 @pytest.fixture(scope="session")
@@ -86,6 +106,19 @@ def test_the_two_parallel_phases_met(status):
     name derived from the account id, and one polls for the other to create it.
     Anything other than 'published' means that rendezvous failed."""
     assert status["proof"] == "published"
+
+
+def test_the_dashboard_is_reachable_from_outside(profile):
+    """Asserted apart from the wait above, which reads the bucket directly.
+
+    A failure here is about the public path — DNS, the certificate, the CDN —
+    and says so, instead of looking like an account that never finished.
+    """
+    code, body = fetch(f"https://{naming.dashboard_host(profile.domain)}/{setup_config.STATUS_KEY}")
+    assert code == 200
+    assert json.loads(body)["state"] == "complete", (
+        "the bucket says complete but the CDN is serving something older"
+    )
 
 
 def test_the_dashboard_serves_its_static_page(profile):
