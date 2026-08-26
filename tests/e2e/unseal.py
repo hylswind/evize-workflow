@@ -260,14 +260,24 @@ def delete_distributions(session, profile):
     for item in items:
         attempt(f"distribution {item['Id']}", lambda i=item: cdnmod.delete(cf, i["Id"]))
 
-    # Origin access controls outlive the distributions that used them, so they
-    # have to be removed explicitly. Named per run, which is why this sweeps the
-    # creation stamp rather than looking for two known names.
+
+def delete_origin_access_controls(session):
+    """A step of its own, because they outlive the distributions that used them.
+
+    A bring-up that died before creating any distribution still leaves these
+    behind, so this cannot sit behind whether there were distributions to
+    remove — which is the case that leaves them stranded.
+    """
+    cf = session.client("cloudfront")
+    found_any = False
     for page in _safe(lambda: list(cf.get_paginator("list_origin_access_controls").paginate()), []):
         for found in page.get("OriginAccessControlList", {}).get("Items", []):
             if naming.is_ours(found["Name"]):
+                found_any = True
                 attempt(f"origin access control {found['Name']}",
                         lambda i=found["Id"]: cdnmod.delete_origin_access_control(cf, i))
+    if not found_any:
+        print("   (none of the enclave's own)")
 
 
 def delete_certificates(session, profile):
@@ -511,6 +521,9 @@ def main(argv=None):
 
     step("the distributions")
     delete_distributions(session, profile)
+
+    step("the origin access controls")
+    delete_origin_access_controls(session)
 
     step("the certificate")
     delete_certificates(session, profile)
