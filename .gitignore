@@ -7,3 +7,8 @@ console.json
 console.7z
 .enclavize-publish.json
 bundle.jsonl
+
+# A caller, a domain and a key id together identify a real account.
+tests/e2e/profiles/*
+!tests/e2e/profiles/example.yml
+tests/e2e/.e2e-state.json

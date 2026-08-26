@@ -254,6 +254,24 @@ when they overlap.
 `tests/aws/test_events.py` prints the `(eventSource, eventName)` pairs a real
 account actually produces, which is how the audit whitelist gets tuned.
 
+### End to end
+
+`tests/e2e/` seals a real account, checks what it built, applies a commit to it,
+and takes it apart again — about two and a half hours. It is not tied to any
+particular caller or application: which reusable workflow signs is read from the
+caller's own workflow file, and everything else comes from a profile.
+
+```
+ENCLAVIZE_E2E=1 ENCLAVIZE_E2E_PROFILE=tests/e2e/profiles/mine.yml \
+ENCLAVIZE_TEST_ACCOUNTS=111122223333 \
+  python tests/e2e/preflight.py && pytest -m e2e tests/e2e/
+```
+
+`tests/e2e/README.md` has the cycle, and what a caller and an application each
+have to look like to be testable. One part of it needs no account at all and
+runs in an ordinary `pytest`: `tests/e2e/test_profile.py` covers the profile
+schema and the derivation of the signer workflow from a caller.
+
 ## Recovering
 
 If a run dies with the console locked, sign-in policies never apply to API calls,

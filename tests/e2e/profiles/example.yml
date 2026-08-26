@@ -1,0 +1,73 @@
+# One profile per account under test. Copy this, fill it in, and point
+# ENCLAVIZE_E2E_PROFILE at your copy — everything but this file is gitignored,
+# because a caller, a domain and a key id together identify a real account.
+#
+# Secrets are never listed here. They come from the environment:
+#
+#   ENCLAVIZE_APPLY_API_KEY         the key the apply endpoint expects
+#   ENCLAVIZE_CONSOLE_ZIP_PASSWORD  optional; only to check the console archive
+#
+# Nothing in this suite is specific to any one caller or application. Point it
+# at your own and it works, as long as they meet the two contracts in README.md.
+
+# The repository whose workflow calls enclavize. Which reusable workflow it
+# calls, and at what ref, is read from that workflow file — not set here, so it
+# cannot disagree with what actually signs the statement.
+caller: acme/enclavize-caller
+
+# The workflow file in that repository. Optional; enclavize.yml by default.
+callerWorkflow: enclavize.yml
+
+# The domain the account ends up owning. Every public name is derived from it.
+domain: example.com
+
+# The root key you keep as a way back in. Not a secret — an access key id, not
+# its secret — and preflight uses it to tell your two root keys apart, since
+# AWS allows exactly two and the loop sits at that limit.
+rescueKeyId: AKIAEXAMPLE
+
+# bypass  — the account already holds the domain. The repeatable case.
+# real    — accept a transfer you have started by hand from the spare account.
+#           Optional; bypass by default, because "real" consumes a pending
+#           transfer and a wrong guess here seals an account without a domain.
+transfer: bypass
+
+app:
+  # The only thing enclavize requires of an application: a repository with an
+  # executable setup.sh at its root.
+  repo: acme/application
+
+  # Which commit to apply. Optional; the default branch's head otherwise.
+  ref: main
+
+  # --- everything below is optional ---------------------------------------
+  #
+  # These describe what one particular application does once applied, not
+  # anything enclavize guarantees. Leave them out and those assertions are
+  # skipped; the apply contract itself is still checked.
+
+  # A URL that should start answering once the commit has been applied.
+  url: https://app.example.com
+
+  # A JSON document reporting the application's own checks, in this shape:
+  #
+  #   {"ok": true,
+  #    "probes": [{"name": "...", "expected": "deny",
+  #                "verdict": "ok", "detail": "AccessDenied ..."}]}
+  #
+  # For an application that probes the permission boundary from inside the
+  # sealed account, this is the only place IAM itself answers rather than a
+  # policy document being read — so set it if your application offers one.
+  resultsUrl: https://app.example.com/results.json
+
+  # A script in the application's repository that removes what it created.
+  # unseal.py runs it, with the rescue credentials, before it dismantles
+  # enclavize — while the hosted zone is still there for it to tidy up.
+  # Leave it out and the application's resources are reported, not removed.
+  teardown: teardown.sh
+
+# Seconds. All optional; these are the defaults.
+timeouts:
+  seal: 3600      # dispatch to a finished workflow run
+  bringup: 5400   # the account building itself: certificate, then two CDNs
+  apply: 900      # an applied commit becoming visible
