@@ -61,7 +61,7 @@ def journal(monkeypatch, tmp_path):
 
     def step(name, result=None):
         def recorder(*args, **kwargs):
-            events.append((name, kwargs))
+            events.append((name, args, kwargs))
             return result
 
         return recorder
@@ -142,10 +142,37 @@ def test_the_account_is_handed_over_only_after_it_is_audited(journal):
     assert order.index("event_check") < order.index("handover")
 
 
+def held_for(journal):
+    return next(args[0] for name, args, _ in journal if name == "hold")
+
+
 def test_history_is_given_time_to_settle_before_it_is_read(journal):
     run()
     order = names(journal)
     assert order.index("hold") < order.index("event_check")
+    assert held_for(journal) == config.HOLD_SECONDS
+
+
+def test_nothing_is_waited_for_when_nothing_will_read_the_history(journal):
+    """The hold exists to let event history finish arriving. Skipping the audit
+    leaves nothing to wait for, and a quarter of an hour is a long time to
+    spend on a history no one reads."""
+    run(ENCLAVIZE_BYPASS_EVENT_CHECK="true")
+    assert held_for(journal) == 0
+
+
+def test_a_skipped_hold_is_recorded_as_a_skipped_hold(journal, tmp_path):
+    """The statement is signed, so holdSeconds has to be what happened rather
+    than what a full run would have done."""
+    run(ENCLAVIZE_BYPASS_EVENT_CHECK="true")
+    statement = json.loads((tmp_path / "statement.json").read_text())
+    assert statement["holdSeconds"] == 0
+
+
+def test_a_clean_run_records_the_hold_it_actually_took(journal, tmp_path):
+    run()
+    statement = json.loads((tmp_path / "statement.json").read_text())
+    assert statement["holdSeconds"] == config.HOLD_SECONDS
 
 
 # --- credentials ----------------------------------------------------------

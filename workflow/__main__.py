@@ -92,6 +92,21 @@ class RunConfig:
             domain_transfer=self.bypass_domain_transfer,
         )
 
+    @property
+    def hold_seconds(self) -> int:
+        """How long to wait before auditing, which is nothing when nothing will
+        audit. The hold is there to let event history finish arriving, and an
+        unread history has no need to be complete.
+
+        Also skipped is the margin the console lockout had to replicate
+        globally. The lock is applied either way and nothing later in the run
+        depends on that propagation having finished.
+
+        Whatever this returns is what the statement records: a skipped hold has
+        to read as zero rather than as a wait that never happened.
+        """
+        return 0 if self.bypass_event_check else config.HOLD_SECONDS
+
 
 def run(cfg, *, res=None, log=print):
     res = res or config.RESOURCES
@@ -171,8 +186,12 @@ def run(cfg, *, res=None, log=print):
     s5_delete_root.delete_root_key(root.client("iam"), cfg.root_key)
     log("root key deleted")
 
-    log(f"holding {config.HOLD_SECONDS}s for history to settle")
-    s6_hold.wait(config.HOLD_SECONDS)
+    log(
+        f"holding {cfg.hold_seconds}s for history to settle"
+        if cfg.hold_seconds
+        else "bypass: not holding, since the hold is there for the history check"
+    )
+    s6_hold.wait(cfg.hold_seconds)
 
     reader = clients.session(identities["reader_key"], identities["reader_secret"], region=cfg.region,
                              record=own_request_ids)
@@ -206,7 +225,7 @@ def run(cfg, *, res=None, log=print):
         account_id=account_id,
         domain=cfg.domain,
         start=cfg.start,
-        hold_seconds=config.HOLD_SECONDS,
+        hold_seconds=cfg.hold_seconds,
         repo_id=repo_id,
         bypasses=cfg.bypasses,
     )

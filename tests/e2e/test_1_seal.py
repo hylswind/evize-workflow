@@ -117,7 +117,10 @@ def test_the_statement_describes_this_account_and_this_app(sealed, profile, acco
     assert statement["accountID"] == account_id
     assert statement["domain"] == profile.domain
     assert statement["start"] == sealed["start"]
-    assert statement["holdSeconds"] == workflow_config.HOLD_SECONDS
+    # This suite always bypasses the audit, and the hold exists to let event
+    # history finish arriving — so there is nothing to wait for, and the
+    # statement has to say so rather than claim a wait that never happened.
+    assert statement["holdSeconds"] == 0
 
 
 def test_the_statement_names_the_app_by_id_not_by_name(sealed, profile):

@@ -16,7 +16,10 @@ service events land there, and CloudFront certificates must live there."""
 
 HOLD_SECONDS = 900
 """Long enough for the sealing actions to reach event history and the console
-lockout to take effect."""
+lockout to take effect.
+
+Spent only when the history will be read. A run that bypasses the audit holds
+for nothing instead, and its statement records that rather than this."""
 
 DELIVERY_POLL_MAX_SECONDS = 1200
 DELIVERY_POLL_INTERVAL = 30

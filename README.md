@@ -117,7 +117,9 @@ GitHub fails while the account can still be used normally.
    so nothing it does can precede the seal. This is the last thing root is
    needed for.
 6. **Delete the root key.** No human credential remains.
-7. Hold, so history settles and the lockout replicates.
+7. Hold, so history settles and the lockout replicates. A run that bypasses the
+   audit holds for nothing instead — the wait is for the history's sake — and
+   its statement records the hold it actually took.
 8. Audit. **Only what root did** — root is the one credential a person was ever
    handed, and any escalation from it leaves a root-produced trace at its root.
    The history is judged in two halves: before the run began, a short allow-list
