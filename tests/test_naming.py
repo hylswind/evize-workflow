@@ -59,3 +59,24 @@ def test_both_phases_import_the_same_function():
     assert workflow_config.proof_bucket_name is naming.proof_bucket_name
     assert setup_config.proof_bucket_name is naming.proof_bucket_name
     assert workflow_config.proof_bucket_name(ACCOUNT_ID) == setup_config.proof_bucket_name(ACCOUNT_ID)
+
+
+def test_a_creation_stamp_says_this_program_made_it():
+    """What a teardown goes on. An account that has registered the domain
+    already has a hosted zone, and a name alone cannot tell it from ours."""
+    stamp = naming.caller_reference(ACCOUNT_ID, "abc123")
+    assert naming.is_ours(stamp)
+    assert ACCOUNT_ID in stamp
+
+
+def test_anything_else_is_left_alone():
+    # What Route 53 puts on the zone it creates when a domain is registered.
+    assert not naming.is_ours("RISWorkflow-RD:36a80f94-f7a9-4a0f-9f2d-8ef77e142c83")
+    assert not naming.is_ours("")
+    assert not naming.is_ours(None)
+
+
+def test_two_runs_in_one_account_do_not_collide():
+    """Origin access control names are unique per account and outlive the
+    distributions using them, so the stamp has to differ run to run."""
+    assert naming.caller_reference(ACCOUNT_ID, "aaa") != naming.caller_reference(ACCOUNT_ID, "bbb")

@@ -20,7 +20,9 @@ import pytest
 from botocore.exceptions import ClientError
 from harness import PREDICATE_TYPE, STATE_FILE, gh, poll, repo_id, verify_attestation
 
+from enclavize.aws import domains as domainsmod
 from enclavize.aws import signin as signinmod
+from enclavize.aws import ssm as ssmmod
 from workflow import config as workflow_config
 
 pytestmark = pytest.mark.e2e
@@ -46,19 +48,19 @@ def sealed(profile, caller, account_id, tmp_path_factory):
     assertions can be re-run without spending another cycle.
     """
     existing = os.environ.get("ENCLAVIZE_E2E_RUN_ID")
-    start = int(datetime.datetime.now(datetime.timezone.utc).timestamp()) - 600
+    start = None
 
     if existing:
         run_id = int(existing)
         # Attaching to a run that already happened, so the window it was given
-        # is the one recorded then. Recomputing one here would check the
-        # statement against a number that had nothing to do with it.
-        start = None
+        # is the one recorded then. Computing one here would check the statement
+        # against a number that had nothing to do with it.
         if STATE_FILE.exists():
             recorded = json.loads(STATE_FILE.read_text())
             if recorded.get("runId") == run_id:
                 start = recorded.get("start")
     else:
+        start = int(datetime.datetime.now(datetime.timezone.utc).timestamp()) - 600
         since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=30)
         gh("workflow", "run", profile.caller_workflow, "--repo", profile.caller,
            "-f", f"domain={profile.domain}",
@@ -88,15 +90,13 @@ def sealed(profile, caller, account_id, tmp_path_factory):
     gh("run", "download", str(run_id), "--repo", profile.caller,
        "-n", "enclavize-console", "-D", str(artifacts), check=False)
 
-    statement_path = artifacts / "statement.json"
+    statement_path = artifacts / workflow_config.STATEMENT_FILE
     statement = json.loads(statement_path.read_text()) if statement_path.exists() else None
 
     STATE_FILE.write_text(json.dumps({
         "runId": run_id,
         "caller": profile.caller,
         "signerWorkflow": caller.signer_workflow,
-        "mode": profile.transfer,
-        "accountId": account_id,
         "start": start,
         "statement": statement,
     }, indent=2) + "\n")
@@ -196,7 +196,7 @@ def test_the_console_archive_needs_its_password(sealed):
     password = os.environ.get("ENCLAVIZE_CONSOLE_ZIP_PASSWORD")
     if not password:
         pytest.skip("ENCLAVIZE_CONSOLE_ZIP_PASSWORD not set")
-    archive = sealed["dir"] / "console.7z"
+    archive = sealed["dir"] / workflow_config.CONSOLE_ARCHIVE
     assert archive.exists(), "no enclavize-console artifact was produced"
 
     def sevenzip(*args):
@@ -208,7 +208,7 @@ def test_the_console_archive_needs_its_password(sealed):
     out = sealed["dir"] / "console"
     subprocess.run(("7z", "x", f"-p{password}", f"-o{out}", "-y", str(archive)),
                    capture_output=True, check=True)
-    credentials = json.loads((out / "console.json").read_text())
+    credentials = json.loads((out / workflow_config.CONSOLE_FILE).read_text())
     assert credentials["accountId"] and credentials["userName"] and credentials["password"]
     assert credentials["signInUrl"].startswith(f"https://{credentials['accountId']}.")
 
@@ -250,7 +250,7 @@ def test_the_identities_that_outlive_root_exist(rescue):
 
 
 def test_the_console_is_locked(rescue):
-    statements = signinmod.list_statements(rescue.client("signin", region_name="us-east-1"))
+    statements = signinmod.list_statements(rescue.client("signin", region_name=signinmod.WRITE_REGION))
     assert len(statements) == 1, f"expected exactly one sign-in statement, found {len(statements)}"
 
 
@@ -275,15 +275,14 @@ def test_the_sign_in_lock_does_not_apply_to_signed_api_calls(rescue, account_id)
 
 
 def test_the_account_was_handed_over(rescue):
-    value = rescue.client("ssm").get_parameter(Name=RESOURCES.go_param)["Parameter"]["Value"]
-    assert value == workflow_config.GO_VALUE
+    assert ssmmod.get_parameter(rescue.client("ssm"), RESOURCES.go_param) == workflow_config.GO_VALUE
 
 
 def test_the_account_holds_the_domain(rescue, profile):
     """In `real` mode this is the proof that accepting the transfer worked —
     the one path no isolated test can reach, since it needs a real pending
     transfer and moves a real domain when it succeeds."""
-    domains = rescue.client("route53domains", region_name="us-east-1")
+    domains = rescue.client("route53domains", region_name=domainsmod.REGION)
     held = {d["DomainName"].lower() for page in domains.get_paginator("list_domains").paginate()
             for d in page["Domains"]}
     assert profile.domain in held

@@ -26,10 +26,12 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from harness import (  # noqa: E402
     Profile,
+    allowed_accounts,
     caller_problems,
     caller_workflow_text,
     derive_caller,
     load_profile,
+    unfit_to_unseal,
 )
 
 REGION = os.environ.get("ENCLAVIZE_TEST_REGION", "us-east-1")
@@ -54,49 +56,31 @@ def profile() -> Profile:
 
 
 @pytest.fixture(scope="session")
-def account_id():
-    """The account under test, checked twice before anything runs."""
-    allowed = {a.strip() for a in os.environ.get("ENCLAVIZE_TEST_ACCOUNTS", "").split(",") if a.strip()}
+def identity():
+    """Who the suite is acting as, gated before anything runs.
+
+    One STS call: the account and the ARN are both wanted, and both come back
+    together.
+    """
+    allowed = allowed_accounts()
     if not allowed:
         pytest.fail("ENCLAVIZE_TEST_ACCOUNTS must list the accounts these tests may touch")
 
-    identity = boto3.client("sts", region_name=REGION).get_caller_identity()
-    current, arn = identity["Account"], identity["Arn"]
-    if current not in allowed:
+    answer = boto3.client("sts", region_name=REGION).get_caller_identity()
+    if answer["Account"] not in allowed:
         pytest.fail(
-            f"refusing to run: account {current} is not in ENCLAVIZE_TEST_ACCOUNTS. "
+            f"refusing to run: account {answer['Account']} is not in ENCLAVIZE_TEST_ACCOUNTS. "
             "These tests seal and then dismantle a real account."
         )
-    problem = unfit_to_unseal(arn, REGION)
+    problem = unfit_to_unseal(answer["Arn"], REGION)
     if problem:
         pytest.fail(f"refusing to run: {problem}")
-    return current
+    return answer
 
 
-def unfit_to_unseal(arn: str, region: str) -> str:
-    """Why these credentials could not take the account apart again, if so.
-
-    Root always can. An IAM user can too, as long as nothing capped it — the
-    apply boundary denies `iam:*` on the enclave identities and `signin:*`
-    outright, so a principal carrying it can seal an account and then never
-    unseal it.
-    """
-    if arn.endswith(":root"):
-        return ""
-    if ":user/" not in arn:
-        return (
-            f"{arn} is neither root nor an IAM user. Use root, or an admin IAM "
-            "user created before the run — it has to outlive the seal."
-        )
-    user = boto3.client("iam", region_name=region).get_user()["User"]
-    if user.get("PermissionsBoundary"):
-        return (
-            f"{arn} carries permissions boundary "
-            f"{user['PermissionsBoundary'].get('PermissionsBoundaryArn')}. The apply "
-            "boundary forbids touching the enclave identities and the sign-in lock, "
-            "so this identity could seal the account and never unseal it."
-        )
-    return ""
+@pytest.fixture(scope="session")
+def account_id(identity):
+    return identity["Account"]
 
 
 @pytest.fixture(scope="session")
@@ -107,10 +91,10 @@ def rescue(account_id):
 
 
 @pytest.fixture(scope="session")
-def caller_arn(account_id):
-    """Who the suite is acting as. Root and an IAM user can see different things
-    — notably, only root can enumerate root's access keys."""
-    return boto3.client("sts", region_name=REGION).get_caller_identity()["Arn"]
+def caller_arn(identity):
+    """Root and an IAM user can see different things — notably, only root can
+    enumerate root's access keys."""
+    return identity["Arn"]
 
 
 @pytest.fixture(scope="session")

@@ -124,8 +124,9 @@ def test_a_real_failure_disabling_still_stops_the_teardown():
 
 def test_listing_statements_follows_pagination():
     # Recovery needs every statement, not just the first page.
-    client = FakeSignin(statements=[{"statementId": "a"}, {"statementId": "b"}])
-    assert [s["statementId"] for s in signin.list_statements(client)] == ["a", "b"]
+    client = FakeSignin(statements=[{signin.STATEMENT_ID_KEY: "a"},
+                                    {signin.STATEMENT_ID_KEY: "b"}])
+    assert [signin.statement_id(s) for s in signin.list_statements(client)] == ["a", "b"]
 
 
 def test_the_statements_key_matches_what_the_service_actually_sends():

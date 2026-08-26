@@ -39,6 +39,7 @@ from enclavize.aws import acm as acmmod  # noqa: E402
 from enclavize.aws import apigw as apigwmod  # noqa: E402
 from enclavize.aws import cdn as cdnmod  # noqa: E402
 from enclavize.aws import dns as dnsmod  # noqa: E402
+from enclavize.aws import domains as domainsmod  # noqa: E402
 from enclavize.aws import ec2 as ec2mod  # noqa: E402
 from enclavize.aws import iam as iammod  # noqa: E402
 from enclavize.aws import s3 as s3mod  # noqa: E402
@@ -46,8 +47,7 @@ from enclavize.aws import sfn as sfnmod  # noqa: E402
 from enclavize.aws import signin as signinmod  # noqa: E402
 from enclavize.aws import ssm as ssmmod  # noqa: E402
 from enclavize.logic import naming  # noqa: E402
-from conftest import unfit_to_unseal  # noqa: E402
-from harness import load_profile  # noqa: E402
+from harness import allowed_accounts, leftovers, load_profile, unfit_to_unseal  # noqa: E402
 from setup import config as setup_config  # noqa: E402
 from workflow import config as workflow_config  # noqa: E402
 
@@ -76,9 +76,11 @@ def attempt(what, action):
         return True
     except ClientError as exc:
         code = exc.response.get("Error", {}).get("Code", "")
+        # Absence only. A malformed request is not the same as a thing that has
+        # already gone, and reporting it as one would have the survey below call
+        # the account clean.
         if code in ("NoSuchEntity", "NoSuchBucket", "NotFoundException", "NoSuchDistribution",
-                    "ResourceNotFoundException", "InvalidParameterValue", "ParameterNotFound",
-                    "NoSuchHostedZone", "ValidationError"):
+                    "ResourceNotFoundException", "ParameterNotFound", "NoSuchHostedZone"):
             print(f"   (already gone) {what}")
         else:
             print(f"   COULD NOT delete {what}: {exc}")
@@ -89,7 +91,7 @@ def attempt(what, action):
 
 
 def check_account(session):
-    allowed = {a.strip() for a in os.environ.get("ENCLAVIZE_TEST_ACCOUNTS", "").split(",") if a.strip()}
+    allowed = allowed_accounts()
     if not allowed:
         raise SystemExit("ENCLAVIZE_TEST_ACCOUNTS must list the accounts this may dismantle")
     identity = session.client("sts").get_caller_identity()
@@ -336,28 +338,13 @@ def delete_zone(session, profile):
         print("   (no hosted zone of the enclave's own)")
         return
 
+    # delete_zone empties the zone first; the apex NS and SOA go with it.
     for zone in ours:
         zone_id = zone["Id"].split("/")[-1]
-        # NS and SOA at the apex cannot be deleted and go with the zone.
-        doomed = [
-            record
-            for page in r53.get_paginator("list_resource_record_sets").paginate(HostedZoneId=zone_id)
-            for record in page["ResourceRecordSets"]
-            if not (record["Name"].rstrip(".") == profile.domain and record["Type"] in ("NS", "SOA"))
-        ]
-        if doomed:
-            attempt(
-                f"{len(doomed)} record(s) in {zone_id}",
-                lambda z=zone_id, d=doomed: dnsmod.change_records(
-                    r53, zone_id=z,
-                    changes=[{"Action": "DELETE", "ResourceRecordSet": r} for r in d],
-                    comment="enclavize teardown",
-                ),
-            )
         attempt(f"hosted zone {zone_id}", lambda z=zone_id: dnsmod.delete_zone(r53, z))
 
 
-def delete_identities(session, account):
+def delete_identities(session):
     """Swept by prefix rather than by a list of names.
 
     Two roles carry an instance profile, not one, and a role inside a profile
@@ -394,7 +381,7 @@ def delete_identities(session, account):
 
 
 def unlock_console(session, account):
-    signin = session.client("signin", region_name="us-east-1")
+    signin = session.client("signin", region_name=signinmod.WRITE_REGION)
     statements = _safe(lambda: signinmod.list_statements(signin), [])
     if not statements:
         print("   (no sign-in statements)")
@@ -414,68 +401,13 @@ def delete_anchor_vpcs(session):
 def send_domain_back(session, profile, target):
     """The half of a transfer this account can perform. The other half —
     accepting it — has to happen on the spare account."""
-    response = session.client("route53domains", region_name="us-east-1") \
+    response = session.client("route53domains", region_name=domainsmod.REGION) \
         .transfer_domain_to_another_aws_account(DomainName=profile.domain, AccountId=target)
     print(f"\n== {profile.domain} offered to {target}")
     print(f"   password: {response['Password']}")
     print("   Accept it from that account within three days, or AWS cancels the transfer:")
     print("     aws route53domains accept-domain-transfer-from-another-aws-account \\")
     print(f"       --domain-name {profile.domain} --password '{response['Password']}' --region us-east-1")
-
-
-def survey(session, account):
-    """What is still standing — enclavize's own as well as an application's.
-
-    A teardown reporting all-clear while something survives is worse than one
-    that fails loudly, so this looks for everything the steps above try to
-    remove, not only the resources they do not own.
-    """
-    ec2 = session.client("ec2")
-    leftovers = []
-
-    for statement in _safe(
-        lambda: signinmod.list_statements(session.client("signin", region_name="us-east-1")), []
-    ):
-        leftovers.append(f"sign-in statement {signinmod.statement_id(statement)}")
-
-    for page in _safe(
-        lambda: list(session.client("acm").get_paginator("list_certificates").paginate()), []
-    ):
-        for certificate in page["CertificateSummaryList"]:
-            leftovers.append(f"certificate {certificate['DomainName']}")
-
-    for page in _safe(
-        lambda: list(session.client("cloudfront")
-                     .get_paginator("list_origin_access_controls").paginate()), []
-    ):
-        for found in page.get("OriginAccessControlList", {}).get("Items", []):
-            if naming.is_ours(found["Name"]):
-                leftovers.append(f"origin access control {found['Name']}")
-
-    iam = session.client("iam")
-    for kind, call, key in (
-        ("role", lambda: iam.list_roles()["Roles"], "RoleName"),
-        ("instance profile", lambda: iam.list_instance_profiles()["InstanceProfiles"],
-         "InstanceProfileName"),
-        ("policy", lambda: iam.list_policies(Scope="Local")["Policies"], "PolicyName"),
-    ):
-        for found in _safe(call, []):
-            if found[key].startswith(RESOURCES.prefix):
-                leftovers.append(f"{kind} {found[key]}")
-    for reservation in _safe(lambda: ec2.describe_instances(
-        Filters=[{"Name": "instance-state-name", "Values": ["pending", "running", "stopped"]}]
-    )["Reservations"], []):
-        leftovers += [f"instance {i['InstanceId']}" for i in reservation["Instances"]]
-    for balancer in _safe(
-        lambda: session.client("elbv2").describe_load_balancers()["LoadBalancers"], []
-    ):
-        leftovers.append(f"load balancer {balancer['LoadBalancerName']}")
-    for bucket in _safe(lambda: session.client("s3").list_buckets()["Buckets"], []):
-        leftovers.append(f"bucket {bucket['Name']}")
-    for group in _safe(lambda: ec2.describe_security_groups()["SecurityGroups"], []):
-        if group["GroupName"] != "default":
-            leftovers.append(f"security group {group['GroupName']}")
-    return leftovers
 
 
 def _safe(call, default):
@@ -525,9 +457,6 @@ def main(argv=None):
     step("the origin access controls")
     delete_origin_access_controls(session)
 
-    step("the certificate")
-    delete_certificates(session, profile)
-
     step("the buckets")
     delete_buckets(session, account)
 
@@ -535,13 +464,19 @@ def main(argv=None):
     delete_zone(session, profile)
 
     step("the identities")
-    delete_identities(session, account)
+    delete_identities(session)
 
     step("the console lock")
     unlock_console(session, account)
 
     step("the anchor VPC")
     delete_anchor_vpcs(session)
+
+    # Last of the deletions: CloudFront hands a certificate back well after the
+    # distribution using it is gone, so everything independent of ACM happens
+    # first and this waits out whatever is left.
+    step("the certificate")
+    delete_certificates(session, profile)
 
     step("the go flag")
     attempt(RESOURCES.go_param,
@@ -550,10 +485,10 @@ def main(argv=None):
     if args.send_domain_back:
         send_domain_back(session, profile, args.send_domain_back)
 
-    leftovers = survey(session, account)
+    remaining = leftovers(session, account, profile)
     print("\n== still standing")
-    if leftovers:
-        for item in leftovers:
+    if remaining:
+        for item in remaining:
             print(f"   {item}")
         print("\n   Remove these before the next cycle; preflight will refuse until it is clean.")
     else:

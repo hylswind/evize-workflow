@@ -17,6 +17,8 @@ import pytest
 from botocore.exceptions import ClientError
 from harness import STATE_FILE, fetch, poll, verify_attestation
 
+from enclavize.aws import dns as dnsmod
+from enclavize.aws import domains as domainsmod
 from enclavize.logic import naming
 from setup import apply as setup_apply
 from setup import config as setup_config
@@ -50,7 +52,7 @@ def status(profile):
     Autouse because every assertion in this file needs the bring-up finished,
     and without it a `-k` selecting one test would race the account.
     """
-    url = f"https://{naming.dashboard_host(profile.domain)}/status.json"
+    url = f"https://{naming.dashboard_host(profile.domain)}/{setup_config.STATUS_KEY}"
 
     def complete():
         code, body = fetch(url)
@@ -95,8 +97,8 @@ def test_the_dashboard_serves_its_static_page(profile):
 # --- the proof ------------------------------------------------------------
 
 
-def test_the_published_statement_is_byte_for_byte_the_signed_one(status, state, profile):
-    code, body = fetch(f"https://{naming.proof_host(profile.domain)}/statement.json")
+def test_the_published_statement_is_byte_for_byte_the_signed_one(state, profile):
+    code, body = fetch(f"https://{naming.proof_host(profile.domain)}/{setup_config.STATEMENT_KEY}")
     assert code == 200
     assert json.loads(body) == state["statement"]
 
@@ -108,13 +110,13 @@ def test_the_proof_site_serves_the_statement_at_its_root(profile):
     assert json.loads(body)["accountID"]
 
 
-def test_the_published_pair_verifies_on_its_own(status, state, profile, tmp_path):
+def test_the_published_pair_verifies_on_its_own(state, profile, tmp_path):
     """The real end-user path: the two files the account publishes, checked
     against each other with no call to GitHub at all. If this works, the proof
     survives the caller repository being deleted."""
     statement = tmp_path / "statement.json"
     bundle = tmp_path / "bundle.jsonl"
-    for path, key in ((statement, "statement.json"), (bundle, "bundle.jsonl")):
+    for path, key in ((statement, setup_config.STATEMENT_KEY), (bundle, setup_config.BUNDLE_KEY)):
         code, body = fetch(f"https://{naming.proof_host(profile.domain)}/{key}")
         assert code == 200, f"{key} is not published"
         path.write_bytes(body)
@@ -145,12 +147,11 @@ def dig(name, record_type, server=None):
 def test_the_registrar_points_at_this_accounts_zone(rescue, profile, zone_id):
     registrar = {
         ns["Name"].rstrip(".").lower()
-        for ns in rescue.client("route53domains", region_name="us-east-1")
+        for ns in rescue.client("route53domains", region_name=domainsmod.REGION)
         .get_domain_detail(DomainName=profile.domain)["Nameservers"]
     }
     zone = {ns.rstrip(".").lower()
-            for ns in rescue.client("route53").get_hosted_zone(Id=zone_id)
-            ["DelegationSet"]["NameServers"]}
+            for ns in dnsmod.nameservers(rescue.client("route53"), zone_id)}
     assert registrar == zone
 
 

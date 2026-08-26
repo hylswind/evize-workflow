@@ -11,6 +11,10 @@ registration at it.
 
 import time
 
+REGION = "us-east-1"
+"""Route 53 Domains is global but answers only here, so every client naming it
+says so. Named rather than repeated, as signin.WRITE_REGION is."""
+
 TERMINAL_OK = "SUCCESSFUL"
 TERMINAL_BAD = ("ERROR", "FAILED")
 

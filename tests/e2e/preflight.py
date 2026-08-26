@@ -20,24 +20,22 @@ import pathlib
 import sys
 
 import boto3
-from botocore.exceptions import ClientError
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
-from enclavize.aws import signin as signinmod  # noqa: E402
-from enclavize.logic import naming  # noqa: E402
-from conftest import unfit_to_unseal  # noqa: E402
+from enclavize.aws import domains as domainsmod  # noqa: E402
 from harness import (  # noqa: E402
     ProfileError,
+    allowed_accounts,
     caller_problems,
     caller_workflow_text,
     derive_caller,
     gh,
+    leftovers,
     load_profile,
+    unfit_to_unseal,
 )
-from setup import config as setup_config  # noqa: E402
-from workflow import config as workflow_config  # noqa: E402
 
 OK, BAD, WARN = "  ok  ", " FAIL ", " warn "
 
@@ -71,7 +69,7 @@ class Report:
 
 def check_identity(report, region):
     """An allow-listed account, and credentials that can undo what a run does."""
-    allowed = {a.strip() for a in os.environ.get("ENCLAVIZE_TEST_ACCOUNTS", "").split(",") if a.strip()}
+    allowed = allowed_accounts()
     if not allowed:
         report.bad("ENCLAVIZE_TEST_ACCOUNTS is empty; refusing to look at any account")
         return None, ""
@@ -151,73 +149,22 @@ def check_root_keys(report, session, profile, arn):
 
 
 def check_account_is_clean(report, session, profile, account):
-    """That the last teardown finished. A leftover is not merely untidy: a
-    surviving role or bucket makes the next run fail deep inside the bring-up."""
-    res, setup_res = workflow_config.RESOURCES, setup_config.RESOURCES
-    iam, s3 = session.client("iam"), session.client("s3")
-    leftovers = []
+    """That the last teardown finished.
 
-    for role in (res.admin_role, setup_res.apply_role, setup_res.apply_sfn_role, setup_res.apply_api_role):
-        try:
-            iam.get_role(RoleName=role)
-            leftovers.append(f"role {role}")
-        except ClientError:
-            pass
-
-    for user in (res.event_reader_user, res.starter_user, res.console_user):
-        try:
-            iam.get_user(UserName=user)
-            leftovers.append(f"user {user}")
-        except ClientError:
-            pass
-
-    try:
-        iam.get_policy(PolicyArn=setup_res.apply_boundary_arn(account))
-        leftovers.append(f"policy {setup_res.apply_boundary}")
-    except ClientError:
-        pass
-
-    for bucket in (naming.proof_bucket_name(account), naming.dashboard_bucket_name(account)):
-        try:
-            s3.head_bucket(Bucket=bucket)
-            leftovers.append(f"bucket {bucket}")
-        except ClientError:
-            pass
-
-    statements = signinmod.list_statements(session.client("signin", region_name="us-east-1"))
-    if statements:
-        leftovers.append(f"{len(statements)} sign-in permission statement(s) — the console is still locked")
-
-    zones = session.client("route53").list_hosted_zones_by_name(DNSName=profile.domain)["HostedZones"]
-    if any(z["Name"].rstrip(".") == profile.domain for z in zones):
-        leftovers.append(f"hosted zone for {profile.domain}")
-
-    ec2 = session.client("ec2")
-    running = [
-        instance["InstanceId"]
-        for reservation in ec2.describe_instances(
-            Filters=[{"Name": "instance-state-name", "Values": ["pending", "running", "stopped"]}]
-        )["Reservations"]
-        for instance in reservation["Instances"]
-    ]
-    if running:
-        leftovers.append(f"{len(running)} live instance(s): {', '.join(running)}")
-
-    try:
-        session.client("ssm").get_parameter(Name=res.go_param)
-        leftovers.append(f"go flag {res.go_param} is still set")
-    except ClientError:
-        pass
-
-    if leftovers:
+    The same description the teardown reports against, so the two cannot
+    disagree about whether a cycle may start — and in particular so a hosted
+    zone the teardown deliberately preserved is not read here as a leftover.
+    """
+    remaining = leftovers(session, account, profile)
+    if remaining:
         report.bad("the previous teardown did not finish — run unseal.py first:")
-        for item in leftovers:
+        for item in remaining:
             print(f"          - {item}")
     else:
         report.ok("account is clean; nothing left from a previous run")
 
 
-def check_caller(report, profile):
+def check_caller(report, profile, secrets):
     """Read the caller rather than assuming it, and say what is wrong with it."""
     try:
         caller = derive_caller(caller_workflow_text(profile))
@@ -240,8 +187,7 @@ def check_caller(report, profile):
             "meant to mean something needs a commit sha"
         )
 
-    have = {s["name"] for s in gh("secret", "list", "--repo", profile.caller,
-                                 "--json", "name", parse_json=True) or []}
+    have = {s["name"] for s in secrets}
     missing = caller.secrets - have
     if missing:
         report.bad(f"{profile.caller} is missing secrets: {', '.join(sorted(missing))}")
@@ -250,7 +196,7 @@ def check_caller(report, profile):
     return caller
 
 
-def check_the_root_key_secret_is_not_spent(report, profile):
+def check_the_root_key_secret_is_not_spent(report, profile, secrets):
     """Whether ROOT_KEY_ID still names a key that exists.
 
     Its value cannot be read — GitHub secrets are write-only — but its age can,
@@ -262,9 +208,7 @@ def check_the_root_key_secret_is_not_spent(report, profile):
     identity, and without it a spent cycle looks ready and dies on its first
     API call.
     """
-    listed = gh("secret", "list", "--repo", profile.caller,
-                "--json", "name,updatedAt", parse_json=True) or []
-    set_at = next((s["updatedAt"] for s in listed if s["name"] == "ROOT_KEY_ID"), None)
+    set_at = next((s["updatedAt"] for s in secrets if s["name"] == "ROOT_KEY_ID"), None)
     if not set_at:
         return
 
@@ -293,7 +237,7 @@ def check_the_root_key_secret_is_not_spent(report, profile):
 def check_domain(report, session, profile):
     """Membership, not an error code: `real` needs the domain elsewhere and
     `bypass` needs it here, and getting this wrong wastes a whole cycle."""
-    domains = session.client("route53domains", region_name="us-east-1")
+    domains = session.client("route53domains", region_name=domainsmod.REGION)
     held = {d["DomainName"].lower() for page in domains.get_paginator("list_domains").paginate()
             for d in page["Domains"]}
     here = profile.domain in held
@@ -347,17 +291,22 @@ def main(argv=None):
     print(f"app       {profile.app.repo}")
     print(f"transfer  {profile.transfer}\n")
 
+    secrets = gh("secret", "list", "--repo", profile.caller,
+                 "--json", "name,updatedAt", parse_json=True) or []
     account, arn = check_identity(report, args.region)
     if account:
         session = boto3.Session(region_name=args.region)
         check_root_keys(report, session, profile, arn)
         check_account_is_clean(report, session, profile, account)
         check_domain(report, session, profile)
-    check_caller(report, profile)
-    check_the_root_key_secret_is_not_spent(report, profile)
+    check_caller(report, profile, secrets)
+    check_the_root_key_secret_is_not_spent(report, profile, secrets)
 
-    for name, why in (("ENCLAVIZE_APPLY_API_KEY", "stage 3 calls the apply endpoint"),):
-        report.check(bool(os.environ.get(name)), f"{name} is set", f"{name} is not set — {why}")
+    report.check(
+        bool(os.environ.get("ENCLAVIZE_APPLY_API_KEY")),
+        "ENCLAVIZE_APPLY_API_KEY is set",
+        "ENCLAVIZE_APPLY_API_KEY is not set — stage 3 calls the apply endpoint",
+    )
     if not os.environ.get("ENCLAVIZE_CONSOLE_ZIP_PASSWORD"):
         report.warn("ENCLAVIZE_CONSOLE_ZIP_PASSWORD is not set; the console archive check will skip")
 
