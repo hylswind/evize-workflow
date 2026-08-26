@@ -103,8 +103,28 @@ def put_state_machine_integration(apigw, *, api_id: str, resource_id: str, http_
     )
     apigw.put_integration_response(
         restApiId=api_id, resourceId=resource_id, httpMethod=http_method, statusCode="200",
-        responseTemplates={"application/json": "$input.json('$')"},
+        responseTemplates={"application/json": STATE_MACHINE_RESPONSE},
     )
+
+
+STATE_MACHINE_RESPONSE = (
+    "#if($input.path('$.status') == 'SUCCEEDED')"
+    "$input.path('$.output')"
+    "#else"
+    '{"status":"$input.path(\'$.status\')",'
+    '"error":"$input.path(\'$.error\')",'
+    '"cause":"$input.path(\'$.cause\')"}'
+    "#end"
+)
+"""What the caller gets back.
+
+The state machine's own answer, not the envelope StartSyncExecution wraps it
+in — which carries billing figures, an execution ARN and internal type names,
+and buries the useful part in a JSON string that has to be parsed twice.
+
+A failure still has to say so: an HTTP 200 here means only that the service ran
+the workflow, so anything other than SUCCEEDED returns the reason instead.
+"""
 
 
 def deploy(apigw, *, api_id: str, stage: str) -> None:

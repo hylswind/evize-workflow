@@ -31,10 +31,27 @@ SETUP_RESOURCES = setup_config.RESOURCES
 
 
 @pytest.fixture(scope="session")
-def endpoint(profile):
-    return "https://{}/{}/{}".format(
+def endpoint(profile, apply_api_key):
+    """The apply endpoint, once it will actually answer.
+
+    A key and a base path mapping both take a moment to reach the edge after
+    the bring-up creates them, and until they have every request is refused as
+    unauthorised. Without waiting, the first assertion of the run reads that
+    refusal as the endpoint rejecting what it was sent.
+
+    A malformed commit is the probe: it can never reach the state machine, and
+    the answer that means "ready" — refused by the validator rather than by the
+    key — is the very thing the first test asserts.
+    """
+    url = "https://{}/{}/{}".format(
         naming.apply_host(profile.domain), setup_config.APPLY_STAGE, setup_config.APPLY_API_PATH
     )
+    poll(
+        lambda: post_json(url, {"commit": "not-a-sha"}, api_key=apply_api_key)[0] == 400,
+        timeout=profile.timeout("apply"), interval=10,
+        what=f"{url} to accept its own API key",
+    )
+    return url
 
 
 @pytest.fixture(scope="session")

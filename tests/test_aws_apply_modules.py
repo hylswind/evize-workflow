@@ -174,6 +174,41 @@ def test_the_integration_targets_start_sync_execution():
     assert template["stateMachineArn"] == "arn:sm"
 
 
+def test_the_caller_gets_the_state_machines_answer_not_the_envelope():
+    """StartSyncExecution wraps the answer in billing figures, an execution ARN
+    and internal type names, with the useful part a JSON string inside it. An
+    operator scripting against this endpoint would have to parse twice and step
+    around the rest."""
+    recorded = {}
+
+    class Recorder:
+        def put_integration(self, **kwargs):
+            pass
+
+        def put_method_response(self, **kwargs):
+            pass
+
+        def put_integration_response(self, **kwargs):
+            recorded.update(kwargs)
+
+    apigw.put_state_machine_integration(
+        Recorder(), api_id="api1", resource_id="res1", http_method="POST", region=REGION,
+        credentials_arn="arn:aws:iam::1:role/api", state_machine_arn="arn:sm",
+    )
+    template = recorded["responseTemplates"]["application/json"]
+    assert "$input.path('$.output')" in template
+    assert "$input.json('$')" not in template, "the whole envelope is being passed through"
+
+
+def test_a_failed_execution_still_says_so():
+    """A 200 here means only that the service ran the workflow. Returning the
+    output unconditionally would report a failure as an empty body."""
+    template = apigw.STATE_MACHINE_RESPONSE
+    assert "SUCCEEDED" in template
+    for field in ("$.status", "$.error", "$.cause"):
+        assert field in template, field
+
+
 def test_the_invoke_url_is_regional():
     url = apigw.invoke_url(api_id="abc123", region=REGION, stage="v1", path="commits")
     assert url == f"https://abc123.execute-api.{REGION}.amazonaws.com/v1/commits"
