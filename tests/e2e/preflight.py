@@ -41,6 +41,10 @@ from workflow import config as workflow_config  # noqa: E402
 
 OK, BAD, WARN = "  ok  ", " FAIL ", " warn "
 
+SEAL_STEP = "seal the account"
+"""The step that deletes the root key it was handed. Naming it is what lets a
+run that got that far be told apart from one that failed before it."""
+
 
 class Report:
     """Collects findings so every problem is reported, not just the first."""
@@ -246,6 +250,46 @@ def check_caller(report, profile):
     return caller
 
 
+def check_the_root_key_secret_is_not_spent(report, profile):
+    """Whether ROOT_KEY_ID still names a key that exists.
+
+    Its value cannot be read — GitHub secrets are write-only — but its age can,
+    and that is enough. A run that reached the sealing step deleted whatever key
+    it was handed, so a secret older than the last such run names a key that is
+    already gone.
+
+    This is the one part of the root-key picture visible from a non-root
+    identity, and without it a spent cycle looks ready and dies on its first
+    API call.
+    """
+    listed = gh("secret", "list", "--repo", profile.caller,
+                "--json", "name,updatedAt", parse_json=True) or []
+    set_at = next((s["updatedAt"] for s in listed if s["name"] == "ROOT_KEY_ID"), None)
+    if not set_at:
+        return
+
+    runs = gh("run", "list", "--repo", profile.caller, "--workflow", profile.caller_workflow,
+              "--limit", "20", "--json", "databaseId,createdAt", parse_json=True) or []
+    for run in runs:
+        # Newest first, and both stamps are UTC in the same format.
+        if run["createdAt"] <= set_at:
+            break
+        jobs = gh("api", f"repos/{profile.caller}/actions/runs/{run['databaseId']}/jobs",
+                  parse_json=True) or {}
+        if any(step.get("name") == SEAL_STEP and step.get("conclusion") == "success"
+               for job in jobs.get("jobs", []) for step in job.get("steps", [])):
+            report.bad(
+                f"ROOT_KEY_ID was set at {set_at}, and the run at {run['createdAt']} sealed "
+                "the account — which deletes the root key it was given, so this secret now "
+                "names a key that no longer exists.\n"
+                "          Mint a new one with the credentials you kept back, then set "
+                "ROOT_KEY_ID and ROOT_SECRET again:\n"
+                "            aws iam create-access-key      # signed as root; an IAM user cannot"
+            )
+            return
+    report.ok("ROOT_KEY_ID has not been spent by a later run")
+
+
 def check_domain(report, session, profile):
     """Membership, not an error code: `real` needs the domain elsewhere and
     `bypass` needs it here, and getting this wrong wastes a whole cycle."""
@@ -310,6 +354,7 @@ def main(argv=None):
         check_account_is_clean(report, session, profile, account)
         check_domain(report, session, profile)
     check_caller(report, profile)
+    check_the_root_key_secret_is_not_spent(report, profile)
 
     for name, why in (("ENCLAVIZE_APPLY_API_KEY", "stage 3 calls the apply endpoint"),):
         report.check(bool(os.environ.get(name)), f"{name} is set", f"{name} is not set — {why}")
