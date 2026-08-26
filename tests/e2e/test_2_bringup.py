@@ -234,7 +234,27 @@ def test_the_boundary_was_narrowed_to_the_enclaves_own_resources(rescue, profile
         domain=profile.domain, hosted_zone_id=zone_id,
         protected={"api_id": mappings[0]["restApiId"], "distribution_ids": distributions},
     )
-    assert live == expected, "the live boundary is not the tightened document this code builds"
+    assert normalised(live) == normalised(expected), (
+        "the live boundary is not the tightened document this code builds"
+    )
+
+
+def normalised(document):
+    """The same policy with every list in a stable order.
+
+    IAM preserves what it was given, and the two distributions reach this
+    comparison in whatever order CloudFront lists them rather than the order the
+    bring-up wrote them. Order carries no meaning in a policy document, so a
+    difference in it is not a difference worth failing on.
+    """
+    def fix(value):
+        if isinstance(value, dict):
+            return {k: fix(v) for k, v in sorted(value.items())}
+        if isinstance(value, list):
+            return sorted((fix(v) for v in value), key=repr)
+        return value
+
+    return fix(document)
 
 
 def test_both_distributions_are_live(rescue):

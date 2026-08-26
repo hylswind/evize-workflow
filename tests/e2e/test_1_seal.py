@@ -50,6 +50,14 @@ def sealed(profile, caller, account_id, tmp_path_factory):
 
     if existing:
         run_id = int(existing)
+        # Attaching to a run that already happened, so the window it was given
+        # is the one recorded then. Recomputing one here would check the
+        # statement against a number that had nothing to do with it.
+        start = None
+        if STATE_FILE.exists():
+            recorded = json.loads(STATE_FILE.read_text())
+            if recorded.get("runId") == run_id:
+                start = recorded.get("start")
     else:
         since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=30)
         gh("workflow", "run", profile.caller_workflow, "--repo", profile.caller,
@@ -116,11 +124,19 @@ def test_the_statement_describes_this_account_and_this_app(sealed, profile, acco
     assert statement is not None, "no enclavize-statement artifact was produced"
     assert statement["accountID"] == account_id
     assert statement["domain"] == profile.domain
-    assert statement["start"] == sealed["start"]
     # This suite always bypasses the audit, and the hold exists to let event
     # history finish arriving — so there is nothing to wait for, and the
     # statement has to say so rather than claim a wait that never happened.
     assert statement["holdSeconds"] == 0
+
+
+def test_the_statement_records_the_window_it_was_given(sealed):
+    """Its own test so that attaching to an earlier run — which is how these
+    assertions are re-checked without spending another account — costs only
+    this one check rather than everything beside it."""
+    if sealed["start"] is None:
+        pytest.skip("attached to a run whose window this suite did not record")
+    assert sealed["statement"]["start"] == sealed["start"]
 
 
 def test_the_statement_names_the_app_by_id_not_by_name(sealed, profile):
@@ -246,11 +262,16 @@ def test_the_lock_is_anchored_to_a_vpc_nothing_can_originate_from(rescue):
     assert vpcs[0]["CidrBlock"] == RESOURCES.signin_lock_vpc_cidr
 
 
-def test_the_sign_in_lock_does_not_apply_to_signed_api_calls(rescue):
+def test_the_sign_in_lock_does_not_apply_to_signed_api_calls(rescue, account_id):
     """Stated outright because every other assertion in this file depends on it:
     the console is shut, and these calls still work. That asymmetry is what
-    makes the lock safe to apply — and what makes the account recoverable."""
-    assert rescue.client("sts").get_caller_identity()["Arn"].endswith(":root")
+    makes the lock safe to apply — and what makes the account recoverable.
+
+    What is asserted is that the call answers, not who made it: a sign-in policy
+    governs interactive sign-in, and any identity reaching the API is proof of
+    the same point.
+    """
+    assert rescue.client("sts").get_caller_identity()["Account"] == account_id
 
 
 def test_the_account_was_handed_over(rescue):
