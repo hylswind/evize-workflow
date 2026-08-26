@@ -56,6 +56,7 @@ profile omits it:
 
 ```json
 {"ok": true,
+ "commit": "473542a6bdbec74ee3b52e8809b034f72b5ba7cf",
  "probes": [{"name": "read the proof bucket", "expected": "deny",
              "verdict": "ok", "detail": "AccessDenied ..."}]}
 ```
@@ -64,6 +65,11 @@ Every probe must have `verdict: "ok"`. For an application that probes the
 permission boundary from inside the sealed account, this is the only place in
 the whole project where IAM itself answers — everywhere else the boundary is
 asserted against a document, which says what should happen rather than what did.
+
+`commit` is optional but worth serving. An application that replaces itself
+keeps answering with the previous deploy's results until the new one is ready,
+and those would satisfy the check at once — reporting a pass for work that had
+not run. Naming the commit lets the suite hold out for the right results.
 
 ## Before the first cycle
 

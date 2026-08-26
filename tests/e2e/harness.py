@@ -315,6 +315,32 @@ def poll(check, *, timeout: int, interval: int = 15, what: str = "condition"):
         time.sleep(interval)
 
 
+def dig(name: str, record_type: str = "A", server: str = "") -> list:
+    """Ask for a record. With `server`, ask that one and nothing else."""
+    args = ["dig", "+short", record_type, name] + ([f"@{server}"] if server else [])
+    out = subprocess.run(args, capture_output=True, text=True, timeout=30)
+    return [line.strip() for line in out.stdout.splitlines() if line.strip()]
+
+
+def await_resolvable(host: str, *, domain: str, timeout: int, interval: int = 15) -> None:
+    """Wait for a name to exist, asking the servers that own it.
+
+    Asking a caching resolver instead is what makes this necessary. "No such
+    record" is a real answer and gets cached for as long as the zone says — so a
+    poll that starts before the record is written spends that time being told
+    what it asked for earlier, and can time out after the name went live.
+
+    Going straight to the authoritative servers leaves the local resolver's
+    first question until there is something to answer it with.
+    """
+    servers = dig(domain, "NS") or [""]
+    poll(
+        lambda: dig(host, "A", servers[0]),
+        timeout=timeout, interval=interval,
+        what=f"{host} to exist, according to {servers[0] or 'the resolver'}",
+    )
+
+
 def fetch(url: str, *, timeout: int = 20):
     """GET a URL, returning (status, body-bytes). Never raises on an HTTP error
     status, because a 403 or a 404 is often the thing being asserted."""

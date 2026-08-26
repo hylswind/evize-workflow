@@ -14,11 +14,10 @@ on a resolver and a CDN to learn something the account can be asked directly.
 """
 
 import json
-import subprocess
 
 import pytest
 from botocore.exceptions import ClientError
-from harness import STATE_FILE, fetch, poll, verify_attestation
+from harness import STATE_FILE, dig, fetch, poll, verify_attestation
 
 from enclavize.aws import dns as dnsmod
 from enclavize.aws import domains as domainsmod
@@ -169,12 +168,6 @@ def test_nothing_inside_the_account_can_rewrite_the_proof(rescue):
 
 
 # --- the domain -----------------------------------------------------------
-
-
-def dig(name, record_type, server=None):
-    args = ["dig", "+short", record_type, name] + ([f"@{server}"] if server else [])
-    out = subprocess.run(args, capture_output=True, text=True, timeout=30)
-    return [line.strip() for line in out.stdout.splitlines() if line.strip()]
 
 
 def test_the_registrar_points_at_this_accounts_zone(rescue, profile, zone_id):

@@ -17,9 +17,10 @@ with the rescue key — a shortcut that would test a path nobody else can take.
 """
 
 import json
+import urllib.parse
 
 import pytest
-from harness import fetch, head_sha, poll, post_json
+from harness import await_resolvable, fetch, head_sha, poll, post_json
 
 from enclavize.aws import s3 as s3mod
 from enclavize.logic import naming
@@ -102,17 +103,26 @@ def test_applying_a_commit_launches_an_instance(applied):
 
 
 def test_the_apply_is_recorded_for_the_dashboard(applied, rescue, account_id):
-    """The only trace of an apply that anyone outside can see."""
+    """The only trace of an apply that anyone outside can see.
+
+    Waits for the record to name *this* execution, not merely to exist. The key
+    is the commit, so applying the same one twice overwrites rather than adds —
+    and waiting on existence alone would be satisfied at once by the previous
+    apply's record, then compared against an instance that had nothing to do
+    with it.
+    """
     bucket = naming.dashboard_bucket_name(account_id)
     key = f"applies/{applied['commit']}.json"
-    found = poll(
-        lambda: s3mod.object_exists(rescue.client("s3"), bucket=bucket, key=key),
-        timeout=120, interval=10, what=f"s3://{bucket}/{key}",
-    )
-    assert found
-    record = json.loads(s3mod.get_bytes(rescue.client("s3"), bucket=bucket, key=key))
+
+    def recorded():
+        if not s3mod.object_exists(rescue.client("s3"), bucket=bucket, key=key):
+            return None
+        found = json.loads(s3mod.get_bytes(rescue.client("s3"), bucket=bucket, key=key))
+        return found if found.get("instanceId") == applied["body"]["instanceId"] else None
+
+    record = poll(recorded, timeout=120, interval=10,
+                  what=f"s3://{bucket}/{key} to name this apply's instance")
     assert record["commit"] == applied["commit"]
-    assert record["instanceId"] == applied["body"]["instanceId"]
 
 
 def test_the_instance_carries_the_bounded_role(applied, rescue):
@@ -131,9 +141,14 @@ def test_the_instance_carries_the_bounded_role(applied, rescue):
 # stands — which is what makes the suite usable against any application.
 
 
-def test_the_application_answers(profile):
+def test_the_application_answers(profile, applied):
     if not profile.app.url:
         pytest.skip("profile sets no app.url; enclavize's own contract is checked above")
+    # The name is claimed by the commit being applied, so it does not exist when
+    # this starts. Asking a caching resolver now would fix "no such host" in
+    # front of it for as long as the zone says, which can outlast the wait.
+    await_resolvable(urllib.parse.urlparse(profile.app.url).hostname,
+                     domain=profile.domain, timeout=profile.timeout("apply"))
     poll(
         lambda: fetch(profile.app.url)[0] == 200,
         timeout=profile.timeout("apply"), interval=15,
@@ -141,21 +156,35 @@ def test_the_application_answers(profile):
     )
 
 
-def test_the_application_reports_its_own_checks_passing(profile):
+def test_the_application_reports_its_own_checks_passing(profile, applied):
     """For an application that probes the permission boundary from inside the
     sealed account, this is the only place IAM itself answers. Everywhere else
     the boundary is asserted against a policy document — which says what should
     happen, not what did.
+
+    Waits for results the commit just applied produced. An application that
+    replaces itself keeps serving the previous deploy's answers until the new
+    one is ready, and those would satisfy this at once — reporting a pass for
+    work that had not run.
     """
     if not profile.app.results_url:
         pytest.skip("profile sets no app.resultsUrl")
 
-    body = poll(
-        lambda: (lambda r: r[1] if r[0] == 200 else None)(fetch(profile.app.results_url)),
-        timeout=profile.timeout("apply"), interval=15,
-        what=f"{profile.app.results_url} to answer",
+    def reported():
+        code, body = fetch(profile.app.results_url)
+        if code != 200:
+            return None
+        found = json.loads(body)
+        # `commit` is optional in the contract. Where an application names the
+        # commit behind its results, this holds out for the right ones.
+        if found.get("commit") and found["commit"] != applied["commit"]:
+            return None
+        return found
+
+    results = poll(
+        reported, timeout=profile.timeout("apply"), interval=15,
+        what=f"{profile.app.results_url} to report on {applied['commit'][:12]}",
     )
-    results = json.loads(body)
 
     failed = [p for p in results.get("probes", []) if p.get("verdict") != "ok"]
     assert not failed, "the application's own checks failed:\n" + "\n".join(
