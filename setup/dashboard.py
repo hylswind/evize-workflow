@@ -98,7 +98,12 @@ def attach_cdn(cf_client, s3_client, r53_client, *, bucket: str, host: str, zone
     Returns without waiting for the distribution to deploy, so this one and the
     proof site can spend their ten-odd minutes concurrently rather than in turn.
     """
-    oac_id = cdn.create_origin_access_control(cf_client, name=f"{bucket}-oac", description="enclavize dashboard")
+    # Named for this run, not for the bucket: an access control outlives the
+    # distribution that used it, and a name shared across runs is a name this
+    # one would have to adopt without knowing how it was configured.
+    oac_id = cdn.create_origin_access_control(
+        cf_client, name=f"{caller_reference}-oac", description="enclavize dashboard"
+    )
     distribution = cdn.create_distribution(
         cf_client,
         caller_reference=caller_reference,

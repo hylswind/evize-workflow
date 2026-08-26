@@ -354,60 +354,21 @@ def test_the_distribution_serves_a_private_bucket_over_https():
     assert result["arn"] == "arn:cf"
 
 
-def test_an_origin_access_control_that_already_exists_is_reused():
-    """Names are unique per account and outlive the distributions that used
-    them, so a bring-up reaching this point a second time would otherwise fail
-    with everything before it already built."""
+def test_a_taken_origin_access_control_name_is_an_error(apigw_client):
+    """Names are per run, so a collision is not this bring-up meeting its own
+    leftovers — it is a name it does not own. Adopting one would mean trusting a
+    configuration nobody checked: `never` sign leaves CloudFront unable to read
+    the bucket at all."""
 
     class Taken:
         def create_origin_access_control(self, **_kwargs):
             raise ClientError(
                 {"Error": {"Code": "OriginAccessControlAlreadyExists", "Message": "exists"}},
-                "CreateOriginAccessControl",
-            )
-
-        def get_paginator(self, _name):
-            class Pages:
-                def paginate(self):
-                    return [{"OriginAccessControlList": {"Items": [
-                        {"Id": "OTHER", "Name": "someone-elses-oac"},
-                        {"Id": "E123", "Name": "enclavize-proof-1-oac"},
-                    ]}}]
-
-            return Pages()
-
-    assert cdn.create_origin_access_control(Taken(), name="enclavize-proof-1-oac") == "E123"
-
-
-def test_an_unfindable_origin_access_control_is_an_error_not_a_guess():
-    class Taken:
-        def create_origin_access_control(self, **_kwargs):
-            raise ClientError(
-                {"Error": {"Code": "OriginAccessControlAlreadyExists", "Message": "exists"}},
-                "CreateOriginAccessControl",
-            )
-
-        def get_paginator(self, _name):
-            class Pages:
-                def paginate(self):
-                    return [{"OriginAccessControlList": {"Items": []}}]
-
-            return Pages()
-
-    with pytest.raises(RuntimeError, match="cannot be found"):
-        cdn.create_origin_access_control(Taken(), name="enclavize-proof-1-oac")
-
-
-def test_any_other_creation_failure_still_propagates():
-    class Denied:
-        def create_origin_access_control(self, **_kwargs):
-            raise ClientError(
-                {"Error": {"Code": "AccessDenied", "Message": "no"}},
                 "CreateOriginAccessControl",
             )
 
     with pytest.raises(ClientError):
-        cdn.create_origin_access_control(Denied(), name="x")
+        cdn.create_origin_access_control(Taken(), name="enclavize-1-abc-proof-oac")
 
 
 def test_deleting_an_origin_access_control_passes_the_current_etag():

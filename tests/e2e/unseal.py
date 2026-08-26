@@ -224,7 +224,7 @@ def delete_state_machines(session):
                     lambda m=machine: sfnmod.delete_state_machine(sfn, m["stateMachineArn"]))
 
 
-def delete_distributions(session, profile, account):
+def delete_distributions(session, profile):
     """Both together. Disabling one takes about twenty minutes to reach the
     edge, and doing them in turn would cost that twice.
 
@@ -260,14 +260,12 @@ def delete_distributions(session, profile, account):
     for item in items:
         attempt(f"distribution {item['Id']}", lambda i=item: cdnmod.delete(cf, i["Id"]))
 
-    # Origin access controls outlive the distributions that used them, and their
-    # names are unique per account — so one left here is what the next bring-up
-    # collides with. Named after the buckets, which is what identifies them.
-    ours = {f"{naming.proof_bucket_name(account)}-oac",
-            f"{naming.dashboard_bucket_name(account)}-oac"}
+    # Origin access controls outlive the distributions that used them, so they
+    # have to be removed explicitly. Named per run, which is why this sweeps the
+    # creation stamp rather than looking for two known names.
     for page in _safe(lambda: list(cf.get_paginator("list_origin_access_controls").paginate()), []):
         for found in page.get("OriginAccessControlList", {}).get("Items", []):
-            if found["Name"] in ours:
+            if naming.is_ours(found["Name"]):
                 attempt(f"origin access control {found['Name']}",
                         lambda i=found["Id"]: cdnmod.delete_origin_access_control(cf, i))
 
@@ -441,7 +439,7 @@ def survey(session, account):
                      .get_paginator("list_origin_access_controls").paginate()), []
     ):
         for found in page.get("OriginAccessControlList", {}).get("Items", []):
-            if found["Name"].startswith(RESOURCES.prefix):
+            if naming.is_ours(found["Name"]):
                 leftovers.append(f"origin access control {found['Name']}")
 
     iam = session.client("iam")
@@ -512,7 +510,7 @@ def main(argv=None):
     delete_state_machines(session)
 
     step("the distributions")
-    delete_distributions(session, profile, account)
+    delete_distributions(session, profile)
 
     step("the certificate")
     delete_certificates(session, profile)

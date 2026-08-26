@@ -39,7 +39,9 @@ def attach_cdn(cf_client, s3_client, r53_client, *, bucket: str, host: str, zone
     explicit deny would race the workflow's upload, which may still be in
     flight. Immutability comes from retiring the writer, not from this policy.
     """
-    oac_id = cdn.create_origin_access_control(cf_client, name=f"{bucket}-oac", description="enclavize proof")
+    oac_id = cdn.create_origin_access_control(
+        cf_client, name=f"{caller_reference}-oac", description="enclavize proof"
+    )
     distribution = cdn.create_distribution(
         cf_client,
         caller_reference=caller_reference,

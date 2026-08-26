@@ -10,7 +10,6 @@ than waiting inline.
 
 import time
 
-from botocore.exceptions import ClientError
 
 # Fixed for every CloudFront distribution; Route 53 alias records need it as the
 # target's hosted zone. Confirmed against the SDK's own Route 53 examples.
@@ -20,34 +19,23 @@ _CACHING_OPTIMIZED_POLICY_ID = "658327ea-f89d-4fab-a63d-7e88639e58f6"
 
 
 def create_origin_access_control(cf, *, name: str, description: str = "") -> str:
-    """Create one, or return the one already carrying this name.
+    """Create one. The name must not already be taken.
 
-    Names are unique per account and outlive the distributions that used them,
-    so a bring-up that reaches this point twice would otherwise fail on the
-    second attempt — with everything before it already built.
+    Callers name these per run rather than per bucket, so a collision here is
+    not a bring-up meeting its own leftovers — it is a name this run does not
+    own. Adopting it would mean trusting a configuration nobody checked: an
+    access control saying `never` sign leaves CloudFront unable to read the
+    bucket at all.
     """
-    try:
-        return cf.create_origin_access_control(
-            OriginAccessControlConfig={
-                "Name": name,
-                "Description": description,
-                "SigningProtocol": "sigv4",
-                "SigningBehavior": "always",
-                "OriginAccessControlOriginType": "s3",
-            }
-        )["OriginAccessControl"]["Id"]
-    except ClientError as exc:
-        if exc.response.get("Error", {}).get("Code") != "OriginAccessControlAlreadyExists":
-            raise
-        return find_origin_access_control(cf, name)
-
-
-def find_origin_access_control(cf, name: str) -> str:
-    for page in cf.get_paginator("list_origin_access_controls").paginate():
-        for found in page.get("OriginAccessControlList", {}).get("Items", []):
-            if found["Name"] == name:
-                return found["Id"]
-    raise RuntimeError(f"enclavize: origin access control {name!r} exists but cannot be found")
+    return cf.create_origin_access_control(
+        OriginAccessControlConfig={
+            "Name": name,
+            "Description": description,
+            "SigningProtocol": "sigv4",
+            "SigningBehavior": "always",
+            "OriginAccessControlOriginType": "s3",
+        }
+    )["OriginAccessControl"]["Id"]
 
 
 def delete_origin_access_control(cf, oac_id: str) -> None:

@@ -64,7 +64,9 @@ def run(*, domain: str, app_repo: str, api_key: str, region: str, res=None, log=
     iam_client = session.client("iam")
 
     account_id = sts.account_id(session.client("sts"))
-    reference = naming.caller_reference(account_id, str(uuid.uuid4()))
+    # A short token: everything unique to this run is derived from it, and an
+    # origin access control name has far less room than a caller reference.
+    reference = naming.caller_reference(account_id, uuid.uuid4().hex[:12])
     log(f"bringing up {domain} in {account_id}")
 
     dashboard_host = naming.dashboard_host(domain)
