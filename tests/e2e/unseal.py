@@ -110,9 +110,9 @@ def run_app_teardown(profile, *, region, assume_yes):
     """Let the application remove what it created, before the zone goes.
 
     Only the application knows what it built, so this is the one part of the
-    teardown that cannot be written generically here. Run first, because an
+    teardown that cannot be written generically here. It runs early, because an
     application usually has DNS records to tidy and the hosted zone is deleted
-    below.
+    below — but after the instances, which it does not own and cannot remove.
 
     ⚠️ This executes a script from another repository on this machine, with
     credentials that bypass the permission boundary — a wider grant than the
@@ -187,7 +187,13 @@ def terminate_instances(session):
     if not live:
         print("   (none of the enclave's own running)")
         return
-    attempt(f"{len(live)} instance(s)", lambda: ec2.terminate_instances(InstanceIds=live))
+    if not attempt(f"{len(live)} instance(s)", lambda: ec2.terminate_instances(InstanceIds=live)):
+        return
+    # Waited out rather than fired and forgotten: an instance keeps hold of its
+    # security groups until it has actually gone, and the application's teardown
+    # runs next expecting to delete the ones it attached.
+    print("   waiting for them to go, so the groups they hold are released")
+    _safe(lambda: ec2.get_waiter("instance_terminated").wait(InstanceIds=live), None)
 
 
 def delete_apply_api(session, profile):
@@ -439,11 +445,16 @@ def main(argv=None):
     if not args.yes and input("continue? [y/N] ").strip().lower() != "y":
         return 1
 
-    step("the application's own resources")
-    run_app_teardown(profile, region=args.region, assume_yes=args.yes)
-
+    # Before the application's teardown, not after. The instance an apply runs
+    # on belongs to enclavize — its state machine launched it — but it carries
+    # the security groups the application attached, and those cannot be deleted
+    # while anything still holds them. The application cannot remove an instance
+    # it did not create, so this has to go first.
     step("instances")
     terminate_instances(session)
+
+    step("the application's own resources")
+    run_app_teardown(profile, region=args.region, assume_yes=args.yes)
 
     step("the apply API")
     delete_apply_api(session, profile)
