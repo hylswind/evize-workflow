@@ -5,7 +5,7 @@ the starter to fire the go flag and publish proof. Each session is built from
 explicit keys because the runner has no ambient credentials and must never pick
 any up.
 
-Every session can also record the request id of every call it makes. That is
+Every session can also record the request id of every request it sends. That is
 what lets the audit distinguish enclavize's own calls from a person's: CloudTrail
 reports the same id back as `requestID`, so the run can prove which events are
 its own instead of inferring it from what the events look like.
@@ -16,18 +16,28 @@ import boto3
 from . import config
 
 
-def _recorder(record):
-    """Capture the request id of every call, whether or not it succeeded.
+RECORD_EVENT = "response-received.*.*"
+"""Fired once per HTTP attempt, from inside botocore's retry loop.
 
-    A rejected API call still reaches AWS and is still logged by CloudTrail, and
-    botocore raises it through `after-call` with a parsed error body that
-    carries the id — so one hook covers both. `after-call-error` fires only when
-    no request reached AWS at all, which leaves nothing in the history to
-    reconcile against.
+Attempts are what CloudTrail records, so attempts are what has to be recorded.
+botocore retries throttling and server errors within a single call, and each
+attempt that reaches AWS is logged under its own request id; `after-call` fires
+once per call and would capture only the last of them, leaving the earlier
+attempts in the history looking like somebody else's work.
+"""
+
+
+def _recorder(record):
+    """Capture the request id of every attempt, whether or not it succeeded.
+
+    A rejected attempt still reached AWS and is still logged, and its error body
+    carries the id the same way a successful one does. An attempt that never
+    arrived has no response to read an id from, and leaves nothing in the
+    history to reconcile against either.
     """
 
-    def capture(parsed, **_kwargs):
-        request_id = (parsed or {}).get("ResponseMetadata", {}).get("RequestId")
+    def capture(parsed_response=None, **_kwargs):
+        request_id = (parsed_response or {}).get("ResponseMetadata", {}).get("RequestId")
         if request_id:
             record.add(request_id)
 
@@ -41,5 +51,5 @@ def session(access_key: str, secret_key: str, *, region: str = None, record=None
         region_name=region or config.REGION,
     )
     if record is not None:
-        built.events.register("after-call.*.*", _recorder(record))
+        built.events.register(RECORD_EVENT, _recorder(record))
     return built
