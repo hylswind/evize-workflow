@@ -197,11 +197,26 @@ def test_the_console_archive_needs_its_password(sealed):
 # --- what the account looks like now --------------------------------------
 
 
-def test_only_the_rescue_root_key_survives(rescue, profile):
-    """The run deletes the key it was given. Anything else would outlive the
-    seal, which is exactly what the audit exists to catch."""
-    keys = rescue.client("iam").list_access_keys()["AccessKeyMetadata"]
-    remaining = {k["AccessKeyId"] for k in keys}
+def test_the_root_key_the_workflow_was_given_is_gone(rescue, profile, caller_arn):
+    """The run deletes the key it was handed. Anything else would outlive the
+    seal, which is exactly what the audit exists to catch.
+
+    Only root can see this. `list_access_keys` from any other identity silently
+    answers about the *caller* instead — a wrong answer rather than an error —
+    so from an IAM user this can only be checked by hand.
+    """
+    iam = rescue.client("iam")
+    if not caller_arn.endswith(":root"):
+        assert iam.get_account_summary()["SummaryMap"].get("AccountAccessKeysPresent"), (
+            "root has no access key at all — if your way back in was one, it is gone"
+        )
+        pytest.skip(
+            f"signed in as {caller_arn}: AWS offers no way to enumerate root's keys "
+            "from another identity, and AccountAccessKeysPresent is a flag rather "
+            "than a count. Check by hand that only your rescue key remains."
+        )
+
+    remaining = {k["AccessKeyId"] for k in iam.list_access_keys()["AccessKeyMetadata"]}
     assert len(remaining) == 1, f"expected only the rescue key, found {remaining}"
     if profile.rescue_key_id:
         assert remaining == {profile.rescue_key_id}

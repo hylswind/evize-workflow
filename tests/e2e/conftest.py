@@ -5,9 +5,10 @@ and every one of them is destructive:
 
 - `ENCLAVIZE_E2E=1`, or the stages are not collected at all
 - the account answering STS must be in `ENCLAVIZE_TEST_ACCOUNTS`
-- the caller must be *root* of that account — the rescue key. Only root can
-  undo the sign-in lock and remove what the run created, so anything less means
-  the loop cannot be closed and the account is spent.
+- the credentials must survive the seal and be able to undo it: root, or an IAM
+  user with no permissions boundary. A boundary-carrying principal is fenced off
+  from the enclave identities and the sign-in lock by design, so it could not
+  close the loop and the account would be spent after one run.
 
 test_profile.py is deliberately outside the gate: it needs no account and no
 network, so it runs in an ordinary `pytest` and keeps the parameterisation
@@ -66,20 +67,50 @@ def account_id():
             f"refusing to run: account {current} is not in ENCLAVIZE_TEST_ACCOUNTS. "
             "These tests seal and then dismantle a real account."
         )
-    if not arn.endswith(":root"):
-        pytest.fail(
-            f"refusing to run: {arn} is not the root user. The rescue root key is "
-            "what makes this loop repeatable — without it the account cannot be "
-            "unsealed and is spent after one run."
-        )
+    problem = unfit_to_unseal(arn, REGION)
+    if problem:
+        pytest.fail(f"refusing to run: {problem}")
     return current
+
+
+def unfit_to_unseal(arn: str, region: str) -> str:
+    """Why these credentials could not take the account apart again, if so.
+
+    Root always can. An IAM user can too, as long as nothing capped it — the
+    apply boundary denies `iam:*` on the enclave identities and `signin:*`
+    outright, so a principal carrying it can seal an account and then never
+    unseal it.
+    """
+    if arn.endswith(":root"):
+        return ""
+    if ":user/" not in arn:
+        return (
+            f"{arn} is neither root nor an IAM user. Use root, or an admin IAM "
+            "user created before the run — it has to outlive the seal."
+        )
+    user = boto3.client("iam", region_name=region).get_user()["User"]
+    if user.get("PermissionsBoundary"):
+        return (
+            f"{arn} carries permissions boundary "
+            f"{user['PermissionsBoundary'].get('PermissionsBoundaryArn')}. The apply "
+            "boundary forbids touching the enclave identities and the sign-in lock, "
+            "so this identity could seal the account and never unseal it."
+        )
+    return ""
 
 
 @pytest.fixture(scope="session")
 def rescue(account_id):
-    """The rescue session. Every call it makes happens after the console lock,
-    which is itself the evidence that sign-in policies never touch SigV4."""
+    """The way-back-in session. Every call it makes happens after the console
+    lock, which is itself the evidence that sign-in policies never touch SigV4."""
     return boto3.Session(region_name=REGION)
+
+
+@pytest.fixture(scope="session")
+def caller_arn(account_id):
+    """Who the suite is acting as. Root and an IAM user can see different things
+    — notably, only root can enumerate root's access keys."""
+    return boto3.client("sts", region_name=REGION).get_caller_identity()["Arn"]
 
 
 @pytest.fixture(scope="session")

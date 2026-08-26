@@ -2,6 +2,11 @@
 # ENCLAVIZE_E2E_PROFILE at your copy — everything but this file is gitignored,
 # because a caller, a domain and a key id together identify a real account.
 #
+# The credentials this suite runs with must outlive the seal and not be capped
+# by the apply boundary: root, or an admin IAM user created before the run. An
+# IAM user is the easier choice — the workflow deletes the root key it is given,
+# and a CLI configured with a separate user is unaffected by that churn.
+#
 # Secrets are never listed here. They come from the environment:
 #
 #   ENCLAVIZE_APPLY_API_KEY         the key the apply endpoint expects
@@ -21,9 +26,13 @@ callerWorkflow: enclavize.yml
 # The domain the account ends up owning. Every public name is derived from it.
 domain: example.com
 
-# The root key you keep as a way back in. Not a secret — an access key id, not
-# its secret — and preflight uses it to tell your two root keys apart, since
-# AWS allows exactly two and the loop sits at that limit.
+# Only meaningful when the CLI itself is root. It labels which of the two root
+# keys is your way back in — AWS allows exactly two per user, root included, and
+# the loop sits at that limit: one is spent by the workflow, one is kept.
+#
+# Leave it out when the CLI is an IAM user. AWS offers no API to enumerate
+# root's access keys from another identity, and `list_access_keys` answers about
+# the caller instead — so nothing here could check it.
 rescueKeyId: AKIAEXAMPLE
 
 # bypass  — the account already holds the domain. The repeatable case.

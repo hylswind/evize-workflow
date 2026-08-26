@@ -27,6 +27,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 from enclavize.aws import signin as signinmod  # noqa: E402
 from enclavize.logic import naming  # noqa: E402
+from conftest import unfit_to_unseal  # noqa: E402
 from harness import (  # noqa: E402
     ProfileError,
     caller_problems,
@@ -65,11 +66,11 @@ class Report:
 
 
 def check_identity(report, region):
-    """Root of an allow-listed account, or nothing else can be trusted."""
+    """An allow-listed account, and credentials that can undo what a run does."""
     allowed = {a.strip() for a in os.environ.get("ENCLAVIZE_TEST_ACCOUNTS", "").split(",") if a.strip()}
     if not allowed:
         report.bad("ENCLAVIZE_TEST_ACCOUNTS is empty; refusing to look at any account")
-        return None
+        return None, ""
 
     identity = boto3.client("sts", region_name=region).get_caller_identity()
     account, arn = identity["Account"], identity["Arn"]
@@ -79,39 +80,70 @@ def check_identity(report, region):
         f"account {account} is allow-listed",
         f"account {account} is NOT in ENCLAVIZE_TEST_ACCOUNTS",
     ):
-        return None
-    report.check(
-        arn.endswith(":root"),
-        "credentials are the root user, so the account can be unsealed afterwards",
-        f"{arn} is not root; without the rescue root key this account is spent after one run",
-    )
-    return account
+        return None, arn
 
-
-def check_root_keys(report, session, profile):
-    """AWS allows two access keys per user, root included — and the loop needs
-    both: one for the workflow to delete, one to get back in with. So the
-    interesting failure is a leftover from last time, which leaves no room."""
-    iam = session.client("iam")
-    keys = iam.list_access_keys()["AccessKeyMetadata"]
-
-    if not keys:
-        report.bad("root has no access key; the workflow needs one and you need a rescue key")
-        return
-    for key in keys:
-        role = "rescue" if key["AccessKeyId"] == profile.rescue_key_id else "for the workflow"
-        print(f"          {key['AccessKeyId']}  {key['CreateDate']:%Y-%m-%d %H:%M}  ({role})")
-
-    if profile.rescue_key_id and profile.rescue_key_id not in {k["AccessKeyId"] for k in keys}:
-        report.bad(f"the profile's rescueKeyId {profile.rescue_key_id} does not exist on this account")
-        return
-
-    if len(keys) == 1:
-        report.warn("only one root key: mint the second and set ROOT_KEY_ID before dispatching")
-    elif len(keys) == 2:
-        report.ok("two root keys, which is the AWS maximum — one to spend, one to keep")
+    problem = unfit_to_unseal(arn, region)
+    if problem:
+        report.bad(problem)
     else:
-        report.bad(f"{len(keys)} root keys; expected at most two")
+        report.ok(f"{arn} can unseal this account afterwards")
+    return account, arn
+
+
+def check_root_keys(report, session, profile, arn):
+    """That root has a key for the workflow to spend, and one to get back in.
+
+    AWS allows two access keys per user, root included, and the loop sits at
+    that limit: one is handed to the workflow, which deletes it; the other is
+    the way back in.
+
+    How much of that is visible depends on who is asking. Only root can list
+    root's keys — from any other identity there is no API for it at all, and
+    `list_access_keys` quietly returns the *caller's* keys instead, which is a
+    far worse answer than an error.
+    """
+    iam = session.client("iam")
+
+    if arn.endswith(":root"):
+        keys = iam.list_access_keys()["AccessKeyMetadata"]
+        if not keys:
+            report.bad("root has no access key; the workflow needs one and you need a way back in")
+            return
+        for key in keys:
+            role = "rescue" if key["AccessKeyId"] == profile.rescue_key_id else "for the workflow"
+            print(f"          {key['AccessKeyId']}  {key['CreateDate']:%Y-%m-%d %H:%M}  ({role})")
+        if profile.rescue_key_id and profile.rescue_key_id not in {k["AccessKeyId"] for k in keys}:
+            report.bad(f"the profile's rescueKeyId {profile.rescue_key_id} is not on this account")
+            return
+        if len(keys) == 1:
+            report.warn("only one root key: mint the second and set ROOT_KEY_ID before dispatching")
+        elif len(keys) == 2:
+            report.ok("two root keys, which is the AWS maximum — one to spend, one to keep")
+        else:
+            report.bad(f"{len(keys)} root keys; expected at most two")
+        return
+
+    # Not root. AccountAccessKeysPresent is all AWS offers here, and it is a
+    # presence flag rather than a count: it reads 1 whether root holds one key
+    # or two, so it can only catch root having none at all.
+    summary = iam.get_account_summary()["SummaryMap"]
+    if summary.get("AccountAccessKeysPresent"):
+        report.ok("root has at least one access key")
+    else:
+        report.bad(
+            "root has no access key at all — the workflow needs one, and if your way "
+            "back in was a root key it is gone too"
+        )
+    report.warn(
+        f"signed in as {arn}, not root, so the root keys cannot be enumerated: AWS "
+        "offers no API for it. Check by hand that ROOT_KEY_ID is the key you mean to "
+        "spend, and that a second one exists as your way back in"
+    )
+    if profile.rescue_key_id:
+        report.warn(
+            "rescueKeyId is set but means nothing from a non-root identity; remove it "
+            "from the profile unless you run this suite as root"
+        )
 
 
 def check_account_is_clean(report, session, profile, account):
@@ -271,10 +303,10 @@ def main(argv=None):
     print(f"app       {profile.app.repo}")
     print(f"transfer  {profile.transfer}\n")
 
-    account = check_identity(report, args.region)
+    account, arn = check_identity(report, args.region)
     if account:
         session = boto3.Session(region_name=args.region)
-        check_root_keys(report, session, profile)
+        check_root_keys(report, session, profile, arn)
         check_account_is_clean(report, session, profile, account)
         check_domain(report, session, profile)
     check_caller(report, profile)

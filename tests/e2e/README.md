@@ -15,10 +15,11 @@ sealed for real:
   describes it
 
 **Not proven here: the event-history audit.** Every run in this suite passes
-`bypass_event_check=true`, because keeping a rescue root key means the account
-has two `CreateAccessKey` events and the audit permits exactly one. The audit is
-covered offline in `tests/test_verdict.py`, against a real account's dumped
-history.
+`bypass_event_check=true`, because it keeps a way back into the account and the
+audit is built to refuse exactly that — a second root key shows up as a second
+`CreateAccessKey` where it permits one, an admin IAM user as an `iam:CreateUser`
+on no allow-list. The audit is covered offline in `tests/test_verdict.py`,
+against a real account's dumped history.
 
 ## Nothing here is tied to one caller or one application
 
@@ -69,13 +70,32 @@ asserted against a document, which says what should happen rather than what did.
 1. A spare AWS account holding the domain.
 2. A freshly signed-up account to enclavize, using an address at that domain,
    with IAM billing access enabled.
-3. **Two root access keys** on that account — AWS allows exactly two, and this
-   loop uses both. One goes to the workflow, which deletes it. The other is
-   your way back in, and without it the account is spent after a single run.
-4. `profiles/mine.yml`, copied from `example.yml`. Everything in `profiles/` is
+3. **A way back in that outlives the seal.** Two shapes work:
+   - an **admin IAM user** created before the run, with no permissions
+     boundary. Easier, because the workflow deletes the root key it is handed
+     and a CLI configured with a separate user is unaffected by that churn.
+   - a **second root key**. AWS allows exactly two per user, root included, so
+     the loop sits at that limit: one is spent, one is kept. Set `rescueKeyId`
+     in the profile and preflight can then tell them apart.
+
+   Either way, without one the account is spent after a single run.
+4. **A root key for the workflow to spend**, set as `ROOT_KEY_ID`. If your way
+   back in is an IAM user, this can be the key your CLI used to use.
+5. `profiles/mine.yml`, copied from `example.yml`. Everything in `profiles/` is
    gitignored except the example.
-5. The caller's secrets set, including `ROOT_KEY_ID` for the key the workflow
-   will spend.
+6. The caller's five secrets set.
+
+### What an IAM user cannot see
+
+Only root can enumerate root's access keys — from any other identity there is
+no API for it, and `list_access_keys` answers about the *caller* instead, which
+is a worse failure than an error. `GetAccountSummary` offers only
+`AccountAccessKeysPresent`, a flag rather than a count, so it reads the same
+whether root holds one key or two.
+
+So running as an IAM user, the suite checks that root still has *a* key and
+skips the rest, saying so. Confirm by hand that the workflow's key is gone and
+your way back in is not.
 
 ## A cycle
 
@@ -85,7 +105,7 @@ export ENCLAVIZE_E2E_PROFILE=tests/e2e/profiles/mine.yml
 export ENCLAVIZE_TEST_ACCOUNTS=111122223333
 export ENCLAVIZE_APPLY_API_KEY=...
 export ENCLAVIZE_CONSOLE_ZIP_PASSWORD=...      # optional
-export AWS_PROFILE=...                          # the rescue root key
+export AWS_PROFILE=...                          # root, or your admin IAM user
 
 python tests/e2e/preflight.py                   # read-only; fix what it reports
 pytest -m e2e tests/e2e/test_1_seal.py          # ~25–50 min
@@ -103,9 +123,11 @@ instead of dispatching another, which is how to re-check assertions without
 spending a whole cycle.
 
 `ENCLAVIZE_E2E=1` is only a collection gate. The account under test must also be
-in `ENCLAVIZE_TEST_ACCOUNTS`, and the credentials must be that account's **root**
-— only root can undo the sign-in lock and remove the enclave identities, which
-are fenced off from every other principal the account contains.
+in `ENCLAVIZE_TEST_ACCOUNTS`, and the credentials must be able to undo what a run
+does: root, or an IAM user with no permissions boundary. A boundary-carrying
+principal is refused, because the apply boundary denies `iam:*` on the enclave
+identities and `signin:*` outright — it could seal an account and never unseal
+it.
 
 ## The domain, and why the first cycle differs
 
@@ -124,14 +146,16 @@ accepting half happens on the spare account.
 ## After unsealing
 
 **The account can never pass the event audit again.** Every call `unseal.py`
-makes is a root event carrying no request id enclavize recorded — precisely the
-pattern the audit exists to catch. That is fine for this loop, which always
+makes carries no request id enclavize recorded — precisely the pattern the audit
+exists to catch. That is fine for this loop, which always
 bypasses the audit anyway, but it means a run that proves the audit for real
-needs a fresh account that has never held a rescue key, and gets exactly one
-attempt.
+needs a fresh account with no way back in at all — no second root key, no admin
+IAM user — and gets exactly one attempt. An admin user is caught the same way a
+rescue key is: the `iam:CreateUser` that minted it is a root event on no
+allow-list.
 
 `app.teardown` runs first, while the hosted zone still exists for it to tidy up.
-It executes on your machine with root credentials, which bypass the permission
-boundary — a wider grant than the same script gets inside the account — so
-`unseal.py` prints it and its commit sha and asks before running it. Without
-`--yes`, nothing runs unanswered.
+It executes on your machine with credentials that bypass the permission boundary
+— a wider grant than the same script gets inside the account — so `unseal.py`
+prints it and its commit sha and asks before running it. Without `--yes`, nothing
+runs unanswered.

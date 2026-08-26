@@ -10,13 +10,14 @@ roughly twenty minutes, and nothing else can be deleted until it has. Every step
 tolerates its target already being gone, so a run that dies partway can simply
 be run again.
 
-Only root can do this. Sign-in policies never apply to signed API calls, so the
-locked console is no obstacle — but the enclave identities are fenced off from
-every principal the account itself contains.
+Needs credentials that outlive the seal and are not capped by the apply
+boundary: root, or an admin IAM user created before the run. Sign-in policies
+never apply to signed API calls, so the locked console is no obstacle.
 
-⚠️ Doing this permanently disqualifies the account from ever passing the audit:
-every call below is a root event with no request id enclavize recorded, which is
-exactly the pattern the audit exists to catch.
+⚠️ Doing this permanently disqualifies the account from ever passing the audit.
+Whichever identity is used, its trail is the pattern the audit looks for: root
+calls carrying no request id enclavize recorded, or — for an IAM user — the
+`iam:CreateUser` that minted it, which is on no allow-list.
 """
 
 import argparse
@@ -44,6 +45,7 @@ from enclavize.aws import sfn as sfnmod  # noqa: E402
 from enclavize.aws import signin as signinmod  # noqa: E402
 from enclavize.aws import ssm as ssmmod  # noqa: E402
 from enclavize.logic import naming  # noqa: E402
+from conftest import unfit_to_unseal  # noqa: E402
 from harness import load_profile  # noqa: E402
 from setup import config as setup_config  # noqa: E402
 from workflow import config as workflow_config  # noqa: E402
@@ -88,11 +90,9 @@ def check_account(session):
     identity = session.client("sts").get_caller_identity()
     if identity["Account"] not in allowed:
         raise SystemExit(f"refusing to run: {identity['Account']} is not in ENCLAVIZE_TEST_ACCOUNTS")
-    if not identity["Arn"].endswith(":root"):
-        raise SystemExit(
-            f"refusing to run: {identity['Arn']} is not root. The enclave identities are "
-            "fenced off from everything else in the account."
-        )
+    problem = unfit_to_unseal(identity["Arn"], session.region_name)
+    if problem:
+        raise SystemExit(f"refusing to run: {problem}")
     return identity["Account"]
 
 
@@ -107,7 +107,7 @@ def run_app_teardown(profile, *, region, assume_yes):
     application usually has DNS records to tidy and the hosted zone is deleted
     below.
 
-    ⚠️ This executes a script from another repository on this machine, with root
+    ⚠️ This executes a script from another repository on this machine, with
     credentials that bypass the permission boundary — a wider grant than the
     same script gets inside the account. Hence showing it first.
     """
@@ -138,7 +138,7 @@ def run_app_teardown(profile, *, region, assume_yes):
         for line in script.read_text(encoding="utf-8", errors="replace").splitlines():
             print(f"   | {line}")
         print("   " + "-" * 68)
-        print("   This runs here, as root, which bypasses the permission boundary.")
+        print("   This runs here, with credentials that bypass the permission boundary.")
         if not assume_yes and input("   run it? [y/N] ").strip().lower() != "y":
             print("   skipped.")
             return
@@ -428,9 +428,9 @@ def main(argv=None):
     else:
         print("   nothing. The account is ready for another run.")
 
-    print(f"\nThe console is open again for {RESOURCES.console_user}; the rescue root key is untouched.")
-    print("This account can never pass the event audit again: every call above was a")
-    print("root event with no request id enclavize recorded, which is what the audit looks for.")
+    print(f"\nThe console is open again for {RESOURCES.console_user}; your own credentials are untouched.")
+    print("This account can never pass the event audit again — which is the audit working,")
+    print("not a flaw: a way back in is exactly what enclavize is meant to leave nobody.")
     return 0
 
 
