@@ -52,8 +52,23 @@ def test_starter_can_only_fire_one_parameter_and_write_one_bucket():
     granted = {(s["Action"], s["Resource"]) for s in document["Statement"]}
     assert granted == {
         ("ssm:PutParameter", f"arn:aws:ssm:{REGION}:{ACCOUNT_ID}:parameter/test/go-flag"),
+        ("s3:ListBucket", f"arn:aws:s3:::{PROOF_BUCKET}"),
         ("s3:PutObject", f"arn:aws:s3:::{PROOF_BUCKET}/*"),
     }
+
+
+def test_starter_can_see_the_bucket_it_is_waiting_for():
+    """The two phases share no channel: this identity polls for the bucket the
+    other one creates. HeadBucket is authorised by s3:ListBucket on the bucket
+    itself, and without it S3 answers 403 — indistinguishable from a bucket
+    owned by somebody else, which is how the wait would be read."""
+    document = policies.starter_policy(
+        region=REGION, account_id=ACCOUNT_ID, go_param=GO_PARAM, proof_bucket=PROOF_BUCKET
+    )
+    listing = [s for s in document["Statement"] if s["Action"] == "s3:ListBucket"]
+    assert listing, "the starter cannot poll for the bucket it must upload to"
+    # The bucket, not its contents: HeadBucket is authorised on the bucket ARN.
+    assert listing[0]["Resource"] == f"arn:aws:s3:::{PROOF_BUCKET}"
 
 
 def test_starter_cannot_delete_what_it_wrote():

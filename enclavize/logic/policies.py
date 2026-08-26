@@ -66,6 +66,12 @@ def starter_policy(*, region: str, account_id: str, go_param: str, proof_bucket:
     The proof bucket does not exist yet when this policy is created — the setup
     program makes it later — which IAM permits: a policy may name an ARN that
     has not been created.
+
+    That absence is also why the bucket itself is named alongside its contents.
+    The two phases run in parallel with no channel between them, so this identity
+    has to poll for the bucket to appear before it can upload; HeadBucket needs
+    s3:ListBucket, and without it S3 answers 403 whether the bucket is missing,
+    forbidden or simply not yet made.
     """
     param_name = go_param.lstrip("/")
     return {
@@ -76,6 +82,12 @@ def starter_policy(*, region: str, account_id: str, go_param: str, proof_bucket:
                 "Effect": "Allow",
                 "Action": "ssm:PutParameter",
                 "Resource": f"arn:aws:ssm:{region}:{account_id}:parameter/{param_name}",
+            },
+            {
+                "Sid": "WaitForTheBucket",
+                "Effect": "Allow",
+                "Action": "s3:ListBucket",
+                "Resource": f"arn:aws:s3:::{proof_bucket}",
             },
             {
                 "Sid": "WriteProofOnce",

@@ -34,10 +34,10 @@ class FakeSignin:
     def list_resource_permission_statements(self, **kwargs):
         self.calls.append(("list", kwargs))
         if kwargs.get("nextToken") == "page2":
-            return {"resourcePermissionStatements": self.statements[1:]}
+            return {signin.STATEMENTS_KEY: self.statements[1:]}
         if len(self.statements) > 1:
-            return {"resourcePermissionStatements": self.statements[:1], "nextToken": "page2"}
-        return {"resourcePermissionStatements": self.statements}
+            return {signin.STATEMENTS_KEY: self.statements[:1], "nextToken": "page2"}
+        return {signin.STATEMENTS_KEY: self.statements}
 
 
 def lock(client):
@@ -99,10 +99,24 @@ def test_listing_statements_follows_pagination():
     assert [s["statementId"] for s in signin.list_statements(client)] == ["a", "b"]
 
 
+def test_the_statements_key_matches_what_the_service_actually_sends():
+    """Pinned against botocore's own model, because the failure is silent.
+
+    Reading a key sign-in does not send yields an empty list, and an empty list
+    reads as an unlocked account — so a wrong name here would have the teardown
+    leave the console locked and every check report the account clean.
+    """
+    import boto3
+
+    model = boto3.client("signin", region_name=REGION).meta.service_model
+    output = model.operation_model("ListResourcePermissionStatements").output_shape
+    assert signin.STATEMENTS_KEY in output.members, sorted(output.members)
+
+
 def test_an_account_with_no_statements_lists_nothing_rather_than_failing():
-    """Found against a real account: sign-in answers ResourceNotFoundException
-    when nothing has ever been configured, rather than returning an empty list.
-    Callers are asking what is configured, and 'nothing' is an answer."""
+    """Sign-in answers ResourceNotFoundException when nothing has ever been
+    configured, rather than returning an empty list. Callers are asking what is
+    configured, and 'nothing' is an answer."""
 
     class NeverConfigured:
         def list_resource_permission_statements(self, **_kwargs):

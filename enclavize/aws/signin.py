@@ -14,6 +14,12 @@ from botocore.exceptions import ClientError
 
 WRITE_REGION = "us-east-1"
 
+STATEMENTS_KEY = "permissionStatements"
+"""Where ListResourcePermissionStatements puts its results. Named here so the
+test fakes can be pinned against botocore's own model: reading a key the service
+does not send yields an empty list rather than an error, and an empty list is
+indistinguishable from an unlocked account."""
+
 
 def enable_lock(signin, *, vpc_id: str, account_id: str, region: str, excluded_principal: str,
                 client_token: str) -> str:
@@ -55,7 +61,7 @@ def list_statements(signin) -> list:
             if exc.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
                 return found
             raise
-        found.extend(response.get("resourcePermissionStatements", []))
+        found.extend(response.get(STATEMENTS_KEY, []))
         token = response.get("nextToken")
         if not token:
             return found
