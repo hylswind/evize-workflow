@@ -66,7 +66,6 @@ def journal(monkeypatch, tmp_path):
 
         return recorder
 
-    monkeypatch.setattr(run_module, "assert_sole_root_key", step("sole_root_key"))
     monkeypatch.setattr(
         run_module.s1_identities, "create_identities",
         step("identities", {
@@ -124,7 +123,6 @@ def test_the_instance_is_launched_before_the_root_key_is_deleted(journal):
 def test_the_full_order_is_what_the_seal_depends_on(journal):
     run()
     assert names(journal) == [
-        "sole_root_key",
         "identities",
         "transfer",
         "lock",
@@ -169,7 +167,7 @@ def test_the_console_password_is_written_before_anything_can_fail(journal, tmp_p
     assert written["signInUrl"] == f"https://{ACCOUNT_ID}.signin.aws.amazon.com/console"
     # Written before the account is sealed, so a later failure still leaves the
     # operator a way in.
-    assert order.index("identities") == 1  # after the root-key check
+    assert order.index("identities") == 0
 
 
 # --- bypasses -------------------------------------------------------------
@@ -305,38 +303,3 @@ def test_the_handover_file_is_not_world_readable(tmp_path):
         path, {"proof_bucket": "b", "starter_key": "k", "starter_secret": "s", "region": "us-east-1"}
     )
     assert oct(path.stat().st_mode)[-3:] == "600"
-
-
-# --- the root key must be the only one ------------------------------------
-
-
-class FakeIam:
-    def __init__(self, *key_ids):
-        self.key_ids = key_ids
-
-    def list_access_keys(self):
-        return {"AccessKeyMetadata": [{"AccessKeyId": k} for k in self.key_ids]}
-
-
-def test_one_root_key_that_matches_is_accepted():
-    run_module.assert_sole_root_key(FakeIam("AKIAROOT"), "AKIAROOT")
-
-
-def test_a_second_root_key_stops_the_run():
-    """The run deletes only the key it was given, so another would outlive the
-    seal. Caught here rather than by the audit because the audit runs after the
-    console is shut and root's key is already gone."""
-    with pytest.raises(SystemExit, match="outlive the"):
-        run_module.assert_sole_root_key(FakeIam("AKIAROOT", "AKIAOTHER"), "AKIAROOT")
-
-
-def test_a_key_that_is_not_the_one_we_were_given_stops_the_run():
-    with pytest.raises(SystemExit):
-        run_module.assert_sole_root_key(FakeIam("AKIASOMETHINGELSE"), "AKIAROOT")
-
-
-def test_the_check_runs_before_anything_irreversible(journal):
-    run()
-    order = names(journal)
-    assert order.index("sole_root_key") < order.index("lock")
-    assert order.index("sole_root_key") < order.index("delete_root")

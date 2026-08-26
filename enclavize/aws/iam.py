@@ -96,17 +96,6 @@ def create_policy(iam, *, name: str, document: dict, description: str = "") -> s
         )
 
 
-def own_access_keys(iam) -> list:
-    """The calling identity's own access keys.
-
-    Called as root with no UserName, IAM answers for root itself — which is how
-    the run can confirm before sealing that exactly one root key exists and it
-    is the one it was handed. A second key would outlive the seal, since the run
-    deletes only the key it knows about.
-    """
-    return iam.list_access_keys()["AccessKeyMetadata"]
-
-
 def set_policy_document(iam, *, policy_arn: str, document: dict) -> None:
     """Replace a managed policy's document with a new default version.
 

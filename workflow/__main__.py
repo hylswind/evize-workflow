@@ -15,7 +15,7 @@ import json
 import os
 import sys
 
-from enclavize.aws import iam, sts
+from enclavize.aws import sts
 from enclavize.logic import github, naming, statement as statement_logic, userdata
 
 from . import clients, config, credentials
@@ -93,21 +93,6 @@ class RunConfig:
         )
 
 
-def assert_sole_root_key(iam_client, expected: str) -> None:
-    """Fail while the account is still whole if a second root key exists.
-
-    The audit catches this too, but not until after the seal — by which point
-    the console is shut and root's key is gone. Here it costs nothing.
-    """
-    keys = [k["AccessKeyId"] for k in iam.own_access_keys(iam_client)]
-    if keys != [expected]:
-        raise SystemExit(
-            f"enclavize: root holds {len(keys)} access key(s), and the run was given one. "
-            "The run deletes only the key it was given, so any other would outlive the "
-            "seal. Delete the extras and start again."
-        )
-
-
 def run(cfg, *, res=None, log=print):
     res = res or config.RESOURCES
 
@@ -125,8 +110,6 @@ def run(cfg, *, res=None, log=print):
     workflow_started_at = datetime.datetime.now(datetime.timezone.utc)
     account_id = sts.account_id(root.client("sts"))
     log(f"account {account_id}")
-
-    assert_sole_root_key(root.client("iam"), cfg.root_key)
 
     identities = s1_identities.create_identities(
         root.client("iam"), res=res, region=cfg.region, account_id=account_id
