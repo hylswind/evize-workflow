@@ -1,6 +1,8 @@
 """The console lock. moto has no signin service, so the client is faked; the
 real calls are exercised by tests/aws/test_signin.py."""
 
+import pytest
+from botocore.exceptions import ClientError
 from constants import ACCOUNT_ID, REGION
 
 from enclavize.aws import signin
@@ -95,6 +97,37 @@ def test_listing_statements_follows_pagination():
     # Recovery needs every statement, not just the first page.
     client = FakeSignin(statements=[{"statementId": "a"}, {"statementId": "b"}])
     assert [s["statementId"] for s in signin.list_statements(client)] == ["a", "b"]
+
+
+def test_an_account_with_no_statements_lists_nothing_rather_than_failing():
+    """Found against a real account: sign-in answers ResourceNotFoundException
+    when nothing has ever been configured, rather than returning an empty list.
+    Callers are asking what is configured, and 'nothing' is an answer."""
+
+    class NeverConfigured:
+        def list_resource_permission_statements(self, **_kwargs):
+            raise ClientError(
+                {"Error": {"Code": "ResourceNotFoundException",
+                           "Message": "Requested resource not found"}},
+                "ListResourcePermissionStatements",
+            )
+
+    assert signin.list_statements(NeverConfigured()) == []
+
+
+def test_any_other_error_still_propagates():
+    """Swallowing everything would turn a denied call into 'no lock present',
+    which is precisely the wrong answer for a check that gates a run."""
+
+    class Denied:
+        def list_resource_permission_statements(self, **_kwargs):
+            raise ClientError(
+                {"Error": {"Code": "AccessDeniedException", "Message": "no"}},
+                "ListResourcePermissionStatements",
+            )
+
+    with pytest.raises(ClientError):
+        signin.list_statements(Denied())
 
 
 def test_the_recovery_hint_names_the_account_and_the_write_region():

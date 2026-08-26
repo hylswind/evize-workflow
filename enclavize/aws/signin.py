@@ -10,6 +10,8 @@ is denied except the one console user named as excluded. Write operations must
 go to us-east-1; the policy then replicates globally over a few minutes.
 """
 
+from botocore.exceptions import ClientError
+
 WRITE_REGION = "us-east-1"
 
 
@@ -32,10 +34,14 @@ def enable_lock(signin, *, vpc_id: str, account_id: str, region: str, excluded_p
 
 
 def list_statements(signin) -> list:
-    """Every permission statement on the account.
+    """Every permission statement on the account. None is an empty list.
 
     Needed to undo a lock whose statement id was not kept — which is how the
     recovery path and the real-account test clean up.
+
+    An account that has never had a statement raises ResourceNotFoundException
+    rather than answering with nothing, so that is translated here: callers ask
+    what is configured, and "nothing" is an answer, not a failure.
     """
     found = []
     token = None
@@ -43,7 +49,12 @@ def list_statements(signin) -> list:
         kwargs = {"maxResults": 50}
         if token:
             kwargs["nextToken"] = token
-        response = signin.list_resource_permission_statements(**kwargs)
+        try:
+            response = signin.list_resource_permission_statements(**kwargs)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
+                return found
+            raise
         found.extend(response.get("resourcePermissionStatements", []))
         token = response.get("nextToken")
         if not token:
