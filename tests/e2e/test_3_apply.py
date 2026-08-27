@@ -102,27 +102,60 @@ def test_applying_a_commit_launches_an_instance(applied):
     assert body["instanceId"].startswith("i-")
 
 
+def keys_under(s3, bucket: str, prefix: str) -> list:
+    pages = s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix)
+    return [obj["Key"] for page in pages for obj in page.get("Contents", [])]
+
+
 def test_the_apply_is_recorded_for_the_dashboard(applied, rescue, account_id):
     """The only trace of an apply that anyone outside can see.
 
-    Waits for the record to name *this* execution, not merely to exist. The key
-    is the commit, so applying the same one twice overwrites rather than adds —
-    and waiting on existence alone would be satisfied at once by the previous
-    apply's record, then compared against an instance that had nothing to do
-    with it.
+    Waits for a record naming *this* execution rather than merely for one to
+    exist. The key carries the time, so applying the same commit twice leaves
+    two records — and the instance is what tells them apart.
     """
     bucket = naming.dashboard_bucket_name(account_id)
-    key = f"applies/{applied['commit']}.json"
+    s3 = rescue.client("s3")
 
     def recorded():
-        if not s3mod.object_exists(rescue.client("s3"), bucket=bucket, key=key):
-            return None
-        found = json.loads(s3mod.get_bytes(rescue.client("s3"), bucket=bucket, key=key))
-        return found if found.get("instanceId") == applied["body"]["instanceId"] else None
+        for key in keys_under(s3, bucket, naming.APPLIES_PREFIX):
+            if not key.endswith(f"_{applied['commit']}.json"):
+                continue
+            found = json.loads(s3mod.get_bytes(s3, bucket=bucket, key=key))
+            if found.get("instanceId") == applied["body"]["instanceId"]:
+                return found
+        return None
 
     record = poll(recorded, timeout=120, interval=10,
-                  what=f"s3://{bucket}/{key} to name this apply's instance")
+                  what=f"a record under s3://{bucket}/{naming.APPLIES_PREFIX} naming this instance")
     assert record["commit"] == applied["commit"]
+
+
+def test_the_dashboard_can_reach_that_record_with_no_credentials(applied, profile):
+    """The page is static and cannot list a bucket, so the state machine leaves
+    it an index. Read over HTTPS the way a browser does, because that is the
+    only path anyone outside the account has — the listing above is not one.
+    """
+    host = naming.dashboard_host(profile.domain)
+
+    def indexed():
+        code, body = fetch(f"https://{host}/{naming.APPLIES_MANIFEST_KEY}")
+        if code != 200:
+            return None
+        months = [entry["Key"] for entry in json.loads(body).get("months", [])]
+        if not months:
+            return None
+        # This apply happened moments ago, so its month is the newest there is.
+        code, body = fetch(f"https://{host}/{max(months)}")
+        if code != 200:
+            return None
+        shard = json.loads(body)
+        keys = [entry["Key"] for entry in shard.get("applies", [])]
+        return shard if any(k.endswith(f"_{applied['commit']}.json") for k in keys) else None
+
+    shard = poll(indexed, timeout=180, interval=10,
+                 what=f"https://{host}/{naming.APPLIES_MANIFEST_KEY} to index this apply")
+    assert not shard.get("truncated"), f"{shard['month']} was listed only in part"
 
 
 def test_the_instance_carries_the_bounded_role(applied, rescue):

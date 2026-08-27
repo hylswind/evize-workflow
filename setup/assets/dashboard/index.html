@@ -6,9 +6,28 @@
 <link rel="stylesheet" href="./style.css">
 
 <main>
+  <header class="masthead">
+    <span class="mark">enclavize</span>
+    <span class="status" id="state" data-state="loading">loading</span>
+  </header>
+
   <h1 id="domain">&mdash;</h1>
-  <p id="state" class="muted">loading&hellip;</p>
-  <p id="proof" class="muted small"></p>
+
+  <dl class="bound">
+    <dt>bound repo</dt>
+    <dd><a id="repo" class="pending" rel="noreferrer">&mdash;</a></dd>
+  </dl>
+
+  <section class="log">
+    <h2>apply log <span id="count" class="count"></span></h2>
+    <ol id="applies"></ol>
+    <p id="note" class="note">reading the record&hellip;</p>
+    <button id="earlier" type="button" hidden></button>
+  </section>
+
+  <footer>
+    the only window into this account. everything here was written by the account itself.
+  </footer>
 </main>
 
 <script src="./app.js"></script>

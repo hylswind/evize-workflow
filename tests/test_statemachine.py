@@ -9,6 +9,7 @@ import json
 
 from constants import APP_REPO, DOMAIN, REGION
 
+from enclavize.logic import naming
 from enclavize.logic import statemachine as sm
 
 DASHBOARD_BUCKET = "enclavize-dashboard-123456789012"
@@ -96,8 +97,110 @@ def test_every_apply_is_recorded_for_the_dashboard():
     record = definition()["States"]["RecordApply"]
     assert record["Resource"] == "arn:aws:states:::aws-sdk:s3:putObject"
     assert record["Parameters"]["Bucket"] == DASHBOARD_BUCKET
-    assert record["Parameters"]["Key.$"] == "States.Format('applies/{}.json', $.commit)"
     assert record["Parameters"]["Body"]["instanceId.$"] == "$.launch.Instances[0].InstanceId"
+
+
+def test_applying_the_same_commit_twice_leaves_two_records():
+    """The time leads the key, so a second apply cannot overwrite the first. It
+    leads rather than trails because that is also what makes the keys sort in
+    the order things happened."""
+    key = definition()["States"]["RecordApply"]["Parameters"]["Key.$"]
+    assert key == "States.Format('applies/{}_{}.json', $.at, $.commit)"
+
+
+def test_the_key_the_helper_builds_is_the_key_that_gets_written():
+    """The state machine writes these keys; tests and tooling build them with
+    the helper. Two definitions of one shape, so they are pinned to each other."""
+    expression = definition()["States"]["RecordApply"]["Parameters"]["Key.$"]
+    template = expression.split("'")[1]
+    assert template.format("AT", "SHA") == naming.apply_record_key("AT", "SHA")
+
+
+def test_the_time_is_stamped_once_and_then_reused():
+    """Read afresh in each state it drifts by milliseconds, and an apply landing
+    on the last instant of a month would be filed under the next one."""
+    states = definition()["States"]
+    assert states["RenderUserData"]["Parameters"]["at.$"] == "$$.State.EnteredTime"
+    assert states["RecordApply"]["Parameters"]["Body"]["startedAt.$"] == "$.at"
+    after = {name: s for name, s in states.items() if name != "RenderUserData"}
+    assert "$$.State.EnteredTime" not in json.dumps(after)
+
+
+# --- the index the dashboard reads ---------------------------------------
+
+
+def test_the_index_is_rebuilt_from_listings_rather_than_appended_to():
+    """A listing is idempotent, so a half-written index heals itself on the next
+    apply instead of drifting. It is also the only thing the language can do:
+    there is no intrinsic for appending to an array."""
+    states = definition()["States"]
+    assert states["ListMonth"]["Resource"].endswith("s3:listObjectsV2")
+    assert states["ListMonths"]["Resource"].endswith("s3:listObjectsV2")
+    assert "getObject" not in json.dumps(states)
+
+
+def test_one_month_is_one_listing():
+    """Record keys open with the timestamp, so a month is a prefix — which is
+    what spares this a continuation loop it has no counter for."""
+    states = definition()["States"]
+    assert states["ListMonth"]["Parameters"]["Prefix.$"] == (
+        "States.Format('applies/{}', $.month.name)"
+    )
+    assert states["WhichMonth"]["Parameters"]["name.$"] == (
+        "States.Format('{}-{}', "
+        "States.ArrayGetItem(States.StringSplit($.at, '-'), 0), "
+        "States.ArrayGetItem(States.StringSplit($.at, '-'), 1))"
+    )
+
+
+def test_a_months_listing_cannot_pick_up_a_shard():
+    """The shards live under the same prefix as the records they index."""
+    assert not naming.apply_month_key("2026-08").startswith(
+        naming.apply_month_prefix("2026-08")
+    )
+
+
+def test_the_manifest_names_the_months_and_nothing_else():
+    states = definition()["States"]
+    assert states["ListMonths"]["Parameters"]["Prefix"] == naming.APPLIES_INDEX_PREFIX
+    manifest = states["WriteManifest"]["Parameters"]
+    assert manifest["Key"] == naming.APPLIES_MANIFEST_KEY
+    assert manifest["Body"]["months.$"] == "$.months.Contents"
+
+
+def test_a_month_too_busy_to_list_says_so():
+    """One listing caps at a thousand keys and this makes no second call, so the
+    alternative to saying so is quietly showing part of a month."""
+    body = definition()["States"]["WriteMonthIndex"]["Parameters"]["Body"]
+    assert body["truncated.$"] == "$.page.IsTruncated"
+
+
+def test_what_the_dashboard_rereads_is_not_cached_like_the_rest():
+    states = definition()["States"]
+    for name in ("WriteMonthIndex", "WriteManifest"):
+        assert states[name]["Parameters"]["CacheControl"] == naming.CHANGES_CACHE_CONTROL
+
+
+def test_no_bookkeeping_failure_can_report_a_failed_apply():
+    """By the time any of this runs the instance is up and applying the commit.
+    Letting a listing hiccup fail the execution would have the API answer that
+    the apply failed, for work going ahead regardless."""
+    states = definition()["States"]
+    bookkeeping = ["RecordApply", "ListMonth", "WriteMonthIndex", "ListMonths",
+                   "WriteManifest"]
+
+    # Every task but the launch itself, so a new one cannot be added without a
+    # catch of its own.
+    assert [name for name, s in states.items()
+            if s["Type"] == "Task" and name != "LaunchInstance"] == bookkeeping
+
+    for name in bookkeeping:
+        catch = states[name]["Catch"][0]
+        assert catch["ErrorEquals"] == ["States.ALL"]
+        assert catch["Next"] == "Done"
+        # Without this the error replaces the input, and Done answers with the
+        # instance the launch returned.
+        assert catch["ResultPath"] == "$.indexError"
 
 
 def test_it_returns_as_soon_as_the_instance_exists():

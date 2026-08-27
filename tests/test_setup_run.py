@@ -8,6 +8,7 @@ has.
 """
 
 import json
+import re
 
 import pytest
 from constants import ACCOUNT_ID, APP_REPO, DOMAIN, REGION
@@ -117,7 +118,7 @@ def test_the_apply_machinery_is_built_during_the_certificate_wait(journal):
 
 
 def test_the_state_it_reports_is_not_cached_like_the_rest():
-    """status.json is the only file here that changes. Cached like the static
+    """status.json is rewritten as the bring-up moves. Cached like the static
     page beside it, the one window into the account would answer with a state
     the bring-up left behind hours earlier."""
     recorded = {}
@@ -126,9 +127,9 @@ def test_the_state_it_reports_is_not_cached_like_the_rest():
         def put_object(self, **kwargs):
             recorded.update(kwargs)
 
-    dashboard.mark(Recorder(), bucket="b", domain=DOMAIN, state="complete")
+    dashboard.mark(Recorder(), bucket="b", domain=DOMAIN, app_repo=APP_REPO, state="complete")
     assert recorded["Key"] == config.STATUS_KEY
-    assert recorded["CacheControl"] == config.STATUS_CACHE_CONTROL
+    assert recorded["CacheControl"] == config.CHANGES_CACHE_CONTROL
 
 
 def test_the_apply_endpoint_waits_for_the_certificate(journal):
@@ -199,8 +200,11 @@ def test_the_full_order(journal):
 def test_a_missing_proof_is_reported_rather_than_hidden(journal, monkeypatch):
     marks = []
     monkeypatch.setattr(bringup.proof, "await_and_seal", lambda *a, **k: False)
-    monkeypatch.setattr(bringup.dashboard, "mark",
-                        lambda client, *, bucket, domain, state, proof="pending": marks.append((state, proof)))
+    monkeypatch.setattr(
+        bringup.dashboard, "mark",
+        lambda client, *, bucket, domain, app_repo, state, proof="pending":
+            marks.append((state, proof)),
+    )
 
     result = run()
 
@@ -226,14 +230,49 @@ def test_nothing_in_the_site_needs_building():
     assert not any(key in ("package.json", "package-lock.json") for key in keys)
 
 
-def test_the_site_never_reaches_another_host():
-    # A sealed account cannot fetch anything, and a page with no third-party
-    # requests means nobody outside can see who is looking at it.
-    for _, path in dashboard.asset_files():
-        text = path.read_text(encoding="utf-8")
-        assert "http://" not in text
-        assert "https://" not in text
-        assert "//cdn" not in text
+def asset(name):
+    return (dashboard.ASSETS / name).read_text(encoding="utf-8")
+
+
+def test_the_site_loads_nothing_from_another_host():
+    """Not a ban on naming other hosts — a ban on loading from them.
+
+    A page with no third-party subresources is one nobody outside can watch
+    being read, and one no third party can restyle into saying something else.
+    The typeface has to travel with the page for the same reason.
+    """
+    page, css, script = asset("index.html"), asset("style.css"), asset("app.js")
+
+    assert "@import" not in css
+    for attribute in ("src=", "href="):
+        for fragment in page.split(attribute)[1:]:
+            assert fragment.lstrip("\"'").startswith("./"), fragment[:60]
+    for fragment in css.split("url(")[1:]:
+        assert fragment.lstrip("\"'").startswith("./"), fragment[:60]
+    for fetched in re.findall(r"""read\(\s*["'`]([^"'`]*)""", script):
+        assert fetched.startswith("./"), fetched
+
+    assert "@font-face" in css
+    assert any(path.suffix == ".woff2" for _, path in dashboard.asset_files())
+
+
+def test_the_only_other_host_is_one_a_person_clicks():
+    """github.com is named, and only ever as somewhere a link goes.
+
+    A link costs nothing until it is followed, opens in its own tab so this page
+    stays where it was, and carries rel=noreferrer so following one does not
+    tell GitHub which sealed account it came from.
+    """
+    script = asset("app.js")
+    offsite = [line.strip() for line in script.splitlines()
+               if "https://" in line and not line.lstrip().startswith("//")]
+
+    assert offsite
+    for line in offsite:
+        assert line.startswith(("commit.href =", "repo.href =")), line
+        assert "https://github.com/" in line
+    assert script.count('target = "_blank"') == len(offsite)
+    assert script.count('rel = "noreferrer"') == len(offsite)
 
 
 def test_every_asset_gets_a_content_type_that_will_actually_render():
@@ -271,24 +310,31 @@ def test_uploading_puts_every_file_in_the_bucket():
 
 
 def test_the_status_is_machine_readable_so_it_can_be_polled():
-    status = json.loads(dashboard.render_status(domain=DOMAIN, state="complete", proof="published"))
-    assert status == {"domain": DOMAIN, "state": "complete", "proof": "published"}
+    status = json.loads(dashboard.render_status(
+        domain=DOMAIN, app_repo=APP_REPO, state="complete", proof="published"))
+    assert status == {"domain": DOMAIN, "appRepo": APP_REPO,
+                      "state": "complete", "proof": "published"}
 
 
-def test_the_status_carries_the_domain_so_the_page_can_show_it():
-    # The page is uploaded verbatim, so the domain cannot be baked into it.
-    status = json.loads(dashboard.render_status(domain=DOMAIN, state="starting"))
+def test_the_status_carries_what_the_page_cannot_know_by_itself():
+    """The page is uploaded verbatim, so neither the domain nor the repo it is
+    bound to can be baked into it. Which repo a domain answers to is not visible
+    from outside a sealed account any other way."""
+    status = json.loads(dashboard.render_status(
+        domain=DOMAIN, app_repo=APP_REPO, state="starting"))
     assert status["domain"] == DOMAIN
+    assert status["appRepo"] == APP_REPO
 
 
-def test_the_page_reads_the_status_from_its_own_bucket():
-    script = (dashboard.ASSETS / "app.js").read_text(encoding="utf-8")
-    assert 'fetch("./status.json"' in script
+def test_the_page_reads_everything_it_shows_from_its_own_bucket():
+    script = asset("app.js")
+    assert '"./status.json"' in script
+    assert f'"./{config.APPLIES_MANIFEST_KEY}"' in script
 
 
 def test_the_page_has_somewhere_to_put_each_field():
-    page = (dashboard.ASSETS / "index.html").read_text(encoding="utf-8")
-    for element in ('id="domain"', 'id="state"', 'id="proof"'):
+    page = asset("index.html")
+    for element in ('id="domain"', 'id="state"', 'id="repo"', 'id="applies"'):
         assert element in page
 
 

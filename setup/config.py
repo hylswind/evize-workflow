@@ -8,6 +8,10 @@ the proof handover work.
 from dataclasses import dataclass, replace
 
 from enclavize.logic.naming import (  # re-exported: the cross-phase contract
+    APPLIES_INDEX_PREFIX,
+    APPLIES_MANIFEST_KEY,
+    APPLIES_PREFIX,
+    CHANGES_CACHE_CONTROL,
     apply_host,
     dashboard_bucket_name,
     dashboard_host,
@@ -40,12 +44,6 @@ STATEMENT_KEY = "statement.json"
 BUNDLE_KEY = "bundle.jsonl"
 INDEX_KEY = "index.html"
 STATUS_KEY = "status.json"
-
-STATUS_CACHE_CONTROL = "no-cache"
-"""The distribution's cache policy has a minimum TTL of one second, which it
-applies in place of no-cache — so this is a second of staleness rather than the
-policy's default day. A second is nothing; a day would outlast the bring-up it
-is meant to report on."""
 
 # RFC 7505: a single "." exchanger declares the domain accepts no mail, which is
 # what makes the account's root email address dead.
@@ -94,6 +92,10 @@ RESOURCES = Resources()
 __all__ = [
     "RESOURCES",
     "Resources",
+    "APPLIES_INDEX_PREFIX",
+    "APPLIES_MANIFEST_KEY",
+    "APPLIES_PREFIX",
+    "CHANGES_CACHE_CONTROL",
     "proof_bucket_name",
     "dashboard_bucket_name",
     "dashboard_host",

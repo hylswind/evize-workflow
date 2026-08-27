@@ -154,8 +154,14 @@ terminates itself, so nothing is left holding admin.
 
 Watch the account's two CloudFront distributions until both read **Deployed**,
 then open `https://dashboard.{domain}`. The page reports where the bring-up has
-got to, and `status.json` beside it carries the same state in machine-readable
-form.
+got to, which repo the domain is bound to, and every commit applied since —
+`status.json` beside it carries the first two in machine-readable form.
+
+The apply log is the part the account has to keep for itself. A static page
+cannot list a bucket, so each apply leaves a record and rebuilds the index the
+page reads: one shard per month, and a manifest naming the months. The page
+opens the newest month and walks back from there, so however long the account
+runs, all of it stays reachable and none of it has to be loaded at once.
 
 Wait for Deployed before opening it rather than refreshing while you wait. Until
 the distribution exists there is no address to answer at, and a resolver that

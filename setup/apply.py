@@ -97,21 +97,7 @@ def create_roles(iam_client, *, res, account_id: str, region: str, proof_bucket:
     )
     iam.put_role_policy(
         iam_client, role=res.apply_sfn_role, name="launch-and-record",
-        document={
-            "Version": "2012-10-17",
-            "Statement": [
-                {
-                    "Effect": "Allow",
-                    "Action": ["ec2:RunInstances", "ec2:CreateTags", "ec2:DescribeInstances"],
-                    "Resource": "*",
-                },
-                {
-                    "Effect": "Allow",
-                    "Action": "s3:PutObject",
-                    "Resource": f"arn:aws:s3:::{dashboard_bucket}/applies/*",
-                },
-            ],
-        },
+        document=policies.apply_state_machine_policy(dashboard_bucket=dashboard_bucket),
     )
     # Passing any other role — the admin one above all — would step around the
     # boundary entirely.

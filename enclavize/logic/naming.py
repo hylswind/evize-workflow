@@ -52,6 +52,52 @@ def is_ours(caller_reference_value: str) -> bool:
     return str(caller_reference_value or "").startswith(CALLER_REFERENCE_PREFIX)
 
 
+APPLIES_PREFIX = "applies/"
+"""Where each apply is recorded, under `{startedAt}_{commit}.json`.
+
+The timestamp leads so the keys sort in the order things happened, which is what
+lets one month be listed by prefix alone. The underscore separates them because
+it is the one character an ISO timestamp does not already contain.
+"""
+
+APPLIES_INDEX_PREFIX = "applies/index/"
+"""One shard per month, `{YYYY-MM}.json`, holding that month's listing.
+
+Deliberately below a path no month prefix can reach: `applies/2026-08` cannot
+match `applies/index/…`, so listing a month never picks up a shard.
+"""
+
+APPLIES_MANIFEST_KEY = "applies.json"
+"""Which months hold applies. The dashboard reads this first, opens the newest
+month, and walks back from there — which is how the whole history stays
+reachable without any single file having to hold it."""
+
+CHANGES_CACHE_CONTROL = "no-cache"
+"""For the few objects that are rewritten: the status, the manifest, the shard
+for the current month.
+
+The distribution's cache policy has a minimum TTL of one second, which it
+applies in place of no-cache — so this is a second of staleness rather than the
+policy's default day. A second is nothing; a day would outlast the bring-up or
+the apply it is meant to report. Everything else in the bucket is written once
+and never again, where a day's caching is exactly right.
+"""
+
+
+def apply_record_key(started_at: str, commit: str) -> str:
+    """The key one apply is recorded under."""
+    return f"{APPLIES_PREFIX}{started_at}_{commit}.json"
+
+
+def apply_month_prefix(month: str) -> str:
+    """Everything applied in one month, as an S3 prefix."""
+    return f"{APPLIES_PREFIX}{month}"
+
+
+def apply_month_key(month: str) -> str:
+    return f"{APPLIES_INDEX_PREFIX}{month}.json"
+
+
 def apply_host(domain: str) -> str:
     """Where commits are applied.
 

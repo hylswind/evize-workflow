@@ -1,13 +1,24 @@
 """The apply state machine's definition, as data.
 
-It does one thing: launch an instance that will clone the app and run it. It
-deliberately does not wait for the commit to finish applying — an Express workflow tops
-out at five minutes and API Gateway's integration at 29 seconds, while a real
-apply takes longer than both. Progress is watched on the dashboard instead.
+It does two things: launch an instance that will clone the app and run it, then
+write down that it did. It deliberately does not wait for the commit to finish
+applying — an Express workflow tops out at five minutes and API Gateway's
+integration at 29 seconds, while a real apply takes longer than both. Progress
+is watched on the dashboard instead.
 
 The user-data template is rendered by the state machine rather than baked in,
 so the commit reaches the instance without a Lambda in the path.
+
+**The record is also the dashboard's only source of history.** A sealed account
+runs nothing on a schedule, and a static page cannot list a bucket, so the index
+the dashboard reads has to be written by whatever runs on each apply — which is
+this. It is rebuilt from listings rather than appended to, for two reasons: a
+listing is idempotent, so a half-written index heals itself on the next apply
+instead of drifting; and the Amazon States Language has no way to append to an
+array at all, having no ArrayConcat.
 """
+
+from . import naming
 
 # Instance-profile propagation reaches this launch too, so the state machine
 # retries it the same way the sealing launch does.
@@ -17,6 +28,17 @@ _PROFILE_RETRY = {
     "MaxAttempts": 20,
     "BackoffRate": 1.0,
 }
+
+_KEEP_GOING = [
+    {"ErrorEquals": ["States.ALL"], "ResultPath": "$.indexError", "Next": "Done"}
+]
+"""Everything after the launch is bookkeeping, and must not fail the apply.
+
+By the time these states run the instance is already up and applying the commit.
+Letting a listing hiccup fail the execution would have the API report a failed
+apply for work that is going ahead regardless — the worst of both answers. The
+ResultPath is what keeps the launch's own output alive for Done to answer with.
+"""
 
 
 def build_definition(
@@ -66,6 +88,11 @@ def build_definition(
                 "Type": "Pass",
                 "Parameters": {
                     "commit.$": "$.commit",
+                    # Stamped once and used by everything downstream. Read
+                    # afresh in each state it would drift by milliseconds, and
+                    # an apply landing on the last millisecond of a month would
+                    # be filed under the next one.
+                    "at.$": "$$.State.EnteredTime",
                     "userData.$": (
                         f"States.Base64Encode(States.Format('{escape_for_format(user_data_template)}', "
                         "$.commit, $.commit))"
@@ -98,20 +125,105 @@ def build_definition(
                 "ResultPath": "$.launch",
                 "Next": "RecordApply",
             },
+            # One object per apply, never overwritten: the timestamp in the key
+            # is what makes applying the same commit twice two records rather
+            # than one.
             "RecordApply": {
                 "Type": "Task",
                 "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
                 "Parameters": {
                     "Bucket": dashboard_bucket,
-                    "Key.$": "States.Format('applies/{}.json', $.commit)",
+                    "Key.$": (
+                        f"States.Format('{naming.APPLIES_PREFIX}{{}}_{{}}.json', $.at, $.commit)"
+                    ),
                     "ContentType": "application/json",
                     "Body": {
                         "commit.$": "$.commit",
                         "instanceId.$": "$.launch.Instances[0].InstanceId",
-                        "startedAt.$": "$$.State.EnteredTime",
+                        "startedAt.$": "$.at",
                     },
                 },
                 "ResultPath": None,
+                "Catch": _KEEP_GOING,
+                "Next": "WhichMonth",
+            },
+            # The year and month out of the timestamp. Because record keys open
+            # with that timestamp, it is also the prefix of everything applied
+            # that month — so a month is one listing, with no pagination, no
+            # counter and no loop.
+            "WhichMonth": {
+                "Type": "Pass",
+                "Parameters": {
+                    "name.$": (
+                        "States.Format('{}-{}', "
+                        "States.ArrayGetItem(States.StringSplit($.at, '-'), 0), "
+                        "States.ArrayGetItem(States.StringSplit($.at, '-'), 1))"
+                    ),
+                },
+                "ResultPath": "$.month",
+                "Next": "ListMonth",
+            },
+            "ListMonth": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::aws-sdk:s3:listObjectsV2",
+                "Parameters": {
+                    "Bucket": dashboard_bucket,
+                    "Prefix.$": f"States.Format('{naming.APPLIES_PREFIX}{{}}', $.month.name)",
+                },
+                "ResultPath": "$.page",
+                "Catch": _KEEP_GOING,
+                "Next": "WriteMonthIndex",
+            },
+            "WriteMonthIndex": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+                "Parameters": {
+                    "Bucket": dashboard_bucket,
+                    "Key.$": (
+                        f"States.Format('{naming.APPLIES_INDEX_PREFIX}{{}}.json', $.month.name)"
+                    ),
+                    "ContentType": "application/json",
+                    "CacheControl": naming.CHANGES_CACHE_CONTROL,
+                    "Body": {
+                        "month.$": "$.month.name",
+                        "generatedAt.$": "$.at",
+                        # A listing caps at a thousand keys and this makes no
+                        # second call, so a month busier than that is carried
+                        # through as truncated rather than quietly shortened.
+                        "truncated.$": "$.page.IsTruncated",
+                        "applies.$": "$.page.Contents",
+                    },
+                },
+                "ResultPath": None,
+                "Catch": _KEEP_GOING,
+                "Next": "ListMonths",
+            },
+            "ListMonths": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::aws-sdk:s3:listObjectsV2",
+                "Parameters": {
+                    "Bucket": dashboard_bucket,
+                    "Prefix": naming.APPLIES_INDEX_PREFIX,
+                },
+                "ResultPath": "$.months",
+                "Catch": _KEEP_GOING,
+                "Next": "WriteManifest",
+            },
+            "WriteManifest": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+                "Parameters": {
+                    "Bucket": dashboard_bucket,
+                    "Key": naming.APPLIES_MANIFEST_KEY,
+                    "ContentType": "application/json",
+                    "CacheControl": naming.CHANGES_CACHE_CONTROL,
+                    "Body": {
+                        "generatedAt.$": "$.at",
+                        "months.$": "$.months.Contents",
+                    },
+                },
+                "ResultPath": None,
+                "Catch": _KEEP_GOING,
                 "Next": "Done",
             },
             "Done": {

@@ -1,47 +1,341 @@
-:root {
-  color-scheme: light dark;
-  --ink: #111;
-  --paper: #fff;
+/* A ledger for an account nobody can log in to: ruled lines, one ink, one
+   signal colour. Everything sits on the monospace grid, because everything
+   worth reading here is a hash or a timestamp.
+
+   The typeface travels with the page. Nothing is fetched from another host:
+   a third party that can style this page can change what it appears to say,
+   and this page exists to be believed. */
+
+@font-face {
+  font-family: "Azeret Mono";
+  src: url("./fonts/azeret-mono.woff2") format("woff2");
+  font-weight: 100 900;   /* one variable file covers the whole range */
+  font-style: normal;
+  font-display: swap;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --ink: #f2f2f2;
-    --paper: #0d0d0d;
-  }
+:root {
+  --ground: #0a0a0c;
+  --ink: #ece9e3;
+  --dim: #6a6f78;
+  --faint: #383c43;
+  --rule: rgba(236, 233, 227, 0.09);
+  --seal: #6ee7c8;
+  --wake: #e8a33d;
+  --lost: #e8685d;
+
+  --step: 1.6rem;
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
 }
 
 body {
   margin: 0;
   min-height: 100vh;
-  display: grid;
-  place-items: center;
-  background: var(--paper);
+  background: var(--ground);
   color: var(--ink);
-  font: 16px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 400 15px/1.6 "Azeret Mono", ui-monospace, "Cascadia Mono", "SF Mono",
+    Menlo, "Liberation Mono", monospace;
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scanlines and a vignette, drawn rather than fetched. Faint enough to read as
+   the texture of a surface rather than as a pattern. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  background:
+    repeating-linear-gradient(
+      to bottom,
+      rgba(255, 255, 255, 0.014) 0 1px,
+      transparent 1px 3px
+    ),
+    radial-gradient(120% 90% at 50% 0%, transparent 40%, rgba(0, 0, 0, 0.55) 100%);
 }
 
 main {
-  text-align: center;
-  padding: 2rem;
+  position: relative;
+  z-index: 2;
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: clamp(2rem, 7vw, 5.5rem) clamp(1.25rem, 5vw, 3rem) 4rem;
 }
+
+/* --- masthead ---------------------------------------------------------- */
+
+.masthead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-bottom: 0.85rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.mark {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.42em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+.status {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+.status::before {
+  content: "";
+  display: inline-block;
+  width: 0.5em;
+  height: 0.5em;
+  margin-right: 0.7em;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: 0.08em;
+}
+
+.status[data-state="complete"] {
+  color: var(--seal);
+}
+
+.status[data-state="starting"],
+.status[data-state="apply-ready"] {
+  color: var(--wake);
+}
+
+/* Only while something is still happening. A sealed account is finished, and a
+   pulsing dot would imply otherwise. */
+.status[data-state="starting"]::before,
+.status[data-state="apply-ready"]::before {
+  animation: breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  50% { opacity: 0.25; }
+}
+
+/* --- the domain -------------------------------------------------------- */
 
 h1 {
-  font-size: clamp(1.75rem, 6vw, 3rem);
-  margin: 0 0 .5rem;
-  letter-spacing: -.02em;
+  margin: clamp(1.75rem, 5vw, 3rem) 0 0;
+  font-size: clamp(1.65rem, 6.4vw, 3.4rem);
   font-weight: 600;
+  letter-spacing: -0.035em;
+  line-height: 1.05;
+  overflow-wrap: anywhere;
 }
 
-p {
+/* A double rule, the way a ledger closes a heading. */
+.bound {
+  margin: 1.15rem 0 0;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--rule);
+  box-shadow: 0 -4px 0 -3px var(--rule);
+  display: grid;
+  grid-template-columns: 11rem 1fr;
+  gap: 0.35rem 1rem;
+  align-items: baseline;
+}
+
+dt {
+  font-size: 0.72rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+dd {
   margin: 0;
+  overflow-wrap: anywhere;
 }
 
-.muted {
-  opacity: .65;
+/* --- the log ----------------------------------------------------------- */
+
+.log {
+  margin-top: clamp(2.5rem, 8vw, 4.5rem);
 }
 
-.small {
-  font-size: .875rem;
-  margin-top: .5rem;
+h2 {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0;
+  padding-bottom: 0.8rem;
+  border-bottom: 1px solid var(--rule);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+.count {
+  font-variant-numeric: tabular-nums;
+  color: var(--faint);
+  letter-spacing: 0.08em;
+}
+
+ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+li {
+  display: grid;
+  grid-template-columns: 15rem 1fr;
+  align-items: baseline;
+  gap: 0.15rem 1.25rem;
+  padding: 0.72rem 0.5rem 0.72rem 0;
+  border-bottom: 1px solid var(--rule);
+  animation: rise 0.5s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(0.45rem); }
+}
+
+li:hover {
+  background: rgba(236, 233, 227, 0.028);
+}
+
+.at {
+  color: var(--dim);
+  font-size: 0.86rem;
+  letter-spacing: 0.01em;
+}
+
+.commit {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  overflow-wrap: anywhere;
+}
+
+/* --- links ------------------------------------------------------------- */
+
+a {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 1px solid var(--faint);
+  transition: color 0.16s ease, border-color 0.16s ease;
+}
+
+a:hover,
+a:focus-visible {
+  color: var(--seal);
+  border-bottom-color: var(--seal);
+}
+
+/* U+2191 turned a quarter: the arrow that means "off this page" drawn in the
+   page's own typeface, rather than a glyph the subset does not carry. */
+a[href]::after {
+  content: "\2191";
+  display: inline-block;
+  margin-left: 0.45em;
+  transform: rotate(45deg);
+  color: var(--faint);
+  font-size: 0.85em;
+  transition: color 0.16s ease, transform 0.16s ease;
+}
+
+a:hover::after,
+a:focus-visible::after {
+  color: var(--seal);
+  transform: rotate(45deg) translateY(-0.12em);
+}
+
+/* Not a link yet — the repo is unknown, or the commit has nowhere to point. */
+a.pending {
+  border-bottom-color: transparent;
+  color: var(--dim);
+}
+
+/* --- notes and the earlier control ------------------------------------- */
+
+.note {
+  margin: 1.15rem 0 0;
+  font-size: 0.82rem;
+  color: var(--dim);
+}
+
+.note[data-tone="lost"] {
+  color: var(--lost);
+}
+
+button {
+  margin-top: 1.4rem;
+  padding: 0.62rem 1.1rem;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--dim);
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 0.16s ease, border-color 0.16s ease;
+}
+
+button:hover,
+button:focus-visible {
+  color: var(--ink);
+  border-color: var(--dim);
+}
+
+button[disabled] {
+  cursor: default;
+  color: var(--faint);
+}
+
+footer {
+  margin-top: clamp(3rem, 9vw, 5.5rem);
+  padding-top: 1rem;
+  border-top: 1px solid var(--rule);
+  font-size: 0.74rem;
+  line-height: 1.7;
+  color: var(--faint);
+}
+
+/* --- narrow ------------------------------------------------------------ */
+
+@media (max-width: 40rem) {
+  .bound {
+    grid-template-columns: 1fr;
+    gap: 0.2rem;
+  }
+
+  li {
+    grid-template-columns: 1fr;
+    gap: 0.25rem;
+  }
+
+  .at {
+    order: 2;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
 }

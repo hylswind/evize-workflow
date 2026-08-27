@@ -3,7 +3,7 @@ data here and exercised against real IAM in tests/aws/test_iam.py."""
 
 from constants import ACCOUNT_ID, GO_PARAM, REGION
 
-from enclavize.logic import policies
+from enclavize.logic import naming, policies
 
 PREFIX = "enclavize-"
 PROOF_BUCKET = "enclavize-proof-123456789012"
@@ -163,6 +163,36 @@ def test_the_apply_role_grants_nothing_by_itself():
     # constrains, so an edit here can never widen the role.
     document = policies.apply_role_policy(boundary_arn=BOUNDARY_ARN)
     assert statements(document, "Allow") == []
+
+
+def test_the_state_machine_can_keep_the_index_it_has_to_rebuild():
+    """Writing the record is not enough on its own. The dashboard is static and
+    cannot list a bucket, so the index it reads is rebuilt from a listing on
+    every apply — which needs the listing as well as the write."""
+    document = policies.apply_state_machine_policy(dashboard_bucket=DASHBOARD_BUCKET)
+    writes = next(s for s in statements(document, "Allow") if s["Action"] == "s3:PutObject")
+    assert set(writes["Resource"]) == {
+        f"arn:aws:s3:::{DASHBOARD_BUCKET}/{naming.APPLIES_PREFIX}*",
+        f"arn:aws:s3:::{DASHBOARD_BUCKET}/{naming.APPLIES_MANIFEST_KEY}",
+    }
+    lists = next(s for s in statements(document, "Allow") if s["Action"] == "s3:ListBucket")
+    assert lists["Resource"] == f"arn:aws:s3:::{DASHBOARD_BUCKET}"
+    assert lists["Condition"]["StringLike"]["s3:prefix"] == f"{naming.APPLIES_PREFIX}*"
+
+
+def test_the_state_machine_sees_nothing_else_in_the_bucket():
+    """The page itself lives in the same bucket. Writing over it is not
+    something an apply has any business doing."""
+    document = policies.apply_state_machine_policy(dashboard_bucket=DASHBOARD_BUCKET)
+    inside = f"arn:aws:s3:::{DASHBOARD_BUCKET}/"
+    granted = [resource for statement in statements(document, "Allow")
+               for resource in ([statement["Resource"]] if isinstance(statement["Resource"], str)
+                                else statement["Resource"])
+               if resource.startswith(inside)]
+
+    assert granted
+    assert all(naming.APPLIES_PREFIX in resource
+               or resource.endswith(naming.APPLIES_MANIFEST_KEY) for resource in granted)
 
 
 def test_pass_role_is_limited_to_the_apply_role():

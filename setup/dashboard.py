@@ -29,6 +29,8 @@ _TYPES = {
     ".json": "application/json",
     ".svg": "image/svg+xml",
     ".ico": "image/x-icon",
+    ".woff2": "font/woff2",
+    ".txt": "text/plain; charset=utf-8",
 }
 
 
@@ -69,16 +71,25 @@ def upload_assets(s3_client, *, bucket: str, root=ASSETS) -> list:
     return uploaded
 
 
-def render_status(*, domain: str, state: str, proof: str = "pending") -> bytes:
-    """The one file that changes during a bring-up.
+def render_status(*, domain: str, app_repo: str, state: str, proof: str = "pending") -> bytes:
+    """What the account says about itself.
 
     Machine-readable so the operator can poll it directly, and read by the page
-    so a browser shows the same thing.
+    so a browser shows the same thing. The repo is here rather than baked into
+    the page because the page is uploaded verbatim, and it belongs on the
+    dashboard at all because which repo a domain answers to is not otherwise
+    visible from outside a sealed account.
     """
-    return (json.dumps({"domain": domain, "state": state, "proof": proof}, indent=2) + "\n").encode()
+    return (
+        json.dumps(
+            {"domain": domain, "appRepo": app_repo, "state": state, "proof": proof},
+            indent=2,
+        )
+        + "\n"
+    ).encode()
 
 
-def create_bucket(s3_client, *, bucket: str, region: str, domain: str) -> str:
+def create_bucket(s3_client, *, bucket: str, region: str, domain: str, app_repo: str) -> str:
     """Create the bucket and fill it. Seconds, and needs no certificate.
 
     Deliberately separate from attach_cdn: the content is ready long before
@@ -87,7 +98,7 @@ def create_bucket(s3_client, *, bucket: str, region: str, domain: str) -> str:
     """
     s3.create_bucket(s3_client, bucket, region=region)
     upload_assets(s3_client, bucket=bucket)
-    mark(s3_client, bucket=bucket, domain=domain, state="starting")
+    mark(s3_client, bucket=bucket, domain=domain, app_repo=app_repo, state="starting")
     return bucket
 
 
@@ -135,18 +146,18 @@ def attach_cdn(cf_client, s3_client, r53_client, *, bucket: str, host: str, zone
     return distribution
 
 
-def mark(s3_client, *, bucket: str, domain: str, state: str, proof: str = "pending") -> None:
+def mark(s3_client, *, bucket: str, domain: str, app_repo: str, state: str,
+         proof: str = "pending") -> None:
     """Record where the bring-up has got to.
 
-    The one file here that changes, and so the one that must not be cached like
-    the rest. Everything beside it is written once and never again, where a
-    day's caching is exactly right; this would answer with a state the account
-    left behind hours ago, which is worse than not answering at all.
+    One of the few files here that is rewritten, and so one of the few that must
+    not be cached like the rest: it would otherwise answer with a state the
+    account left behind hours ago, which is worse than not answering at all.
     """
     s3.put_json(
         s3_client,
         bucket=bucket,
         key=config.STATUS_KEY,
-        body=render_status(domain=domain, state=state, proof=proof),
-        cache_control=config.STATUS_CACHE_CONTROL,
+        body=render_status(domain=domain, app_repo=app_repo, state=state, proof=proof),
+        cache_control=config.CHANGES_CACHE_CONTROL,
     )

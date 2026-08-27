@@ -84,7 +84,8 @@ def run(*, domain: str, app_repo: str, api_key: str, region: str, res=None, log=
     log(f"created {proof_bucket}; the workflow can publish as soon as it has signed")
 
     # Static files, so this is a folder copy rather than anything built.
-    dashboard.create_bucket(s3_client, bucket=dashboard_bucket, region=region, domain=domain)
+    dashboard.create_bucket(s3_client, bucket=dashboard_bucket, region=region, domain=domain,
+                            app_repo=app_repo)
     log(f"{dashboard_bucket} filled and waiting for a certificate")
 
     # A transferred domain arrives without its hosted zone.
@@ -141,7 +142,8 @@ def run(*, domain: str, app_repo: str, api_key: str, region: str, res=None, log=
         session.client("apigateway"), iam_client, res=res, region=region, api_key=api_key,
         state_machine_arn=state_machine_arn, api_role_arn=roles["api_role_arn"], account_id=account_id,
     )
-    dashboard.mark(s3_client, bucket=dashboard_bucket, domain=domain, state="apply-ready")
+    dashboard.mark(s3_client, bucket=dashboard_bucket, domain=domain, app_repo=app_repo,
+                   state="apply-ready")
 
     log("waiting for the certificate; this is the longest wait in the bring-up")
     acm.await_issued(acm_client, certificate_arn,
@@ -193,7 +195,8 @@ def run(*, domain: str, app_repo: str, api_key: str, region: str, res=None, log=
 
     published = proof.await_and_seal(s3_client, iam_client, bucket=proof_bucket, res=res, log=log)
 
-    dashboard.mark(s3_client, bucket=dashboard_bucket, domain=domain, state="complete",
+    dashboard.mark(s3_client, bucket=dashboard_bucket, domain=domain, app_repo=app_repo,
+                   state="complete",
                    proof="published" if published else "missing")
     log("bring-up complete")
     return {

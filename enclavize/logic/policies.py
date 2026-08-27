@@ -370,6 +370,45 @@ def apply_role_policy(*, boundary_arn: str) -> dict:
     }
 
 
+def apply_state_machine_policy(*, dashboard_bucket: str) -> dict:
+    """Launch one instance, and keep the dashboard's record of having done so.
+
+    The listing is the part worth explaining. The dashboard is a static page and
+    cannot list a bucket, so the index it reads has to be written by whatever
+    runs on each apply — and that index is rebuilt from a listing rather than
+    appended to, which is what makes it heal itself rather than drift. Held to
+    the one prefix it reads, so this is no view of the rest of the bucket.
+    """
+    return {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Action": ["ec2:RunInstances", "ec2:CreateTags", "ec2:DescribeInstances"],
+                "Resource": "*",
+            },
+            {
+                "Effect": "Allow",
+                "Action": "s3:PutObject",
+                "Resource": [
+                    # The record of each apply, and the month shards indexing
+                    # them, which sit below the same prefix.
+                    f"arn:aws:s3:::{dashboard_bucket}/{naming.APPLIES_PREFIX}*",
+                    f"arn:aws:s3:::{dashboard_bucket}/{naming.APPLIES_MANIFEST_KEY}",
+                ],
+            },
+            {
+                "Effect": "Allow",
+                "Action": "s3:ListBucket",
+                "Resource": f"arn:aws:s3:::{dashboard_bucket}",
+                "Condition": {
+                    "StringLike": {"s3:prefix": f"{naming.APPLIES_PREFIX}*"}
+                },
+            },
+        ],
+    }
+
+
 def pass_role_policy(*, account_id: str, role_name: str) -> dict:
     """Allow passing exactly one role — the apply instance role."""
     return {

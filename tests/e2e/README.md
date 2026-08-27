@@ -13,6 +13,8 @@ sealed for real:
 - the two parallel phases meeting on a bucket name each derives independently
 - the permission boundary as IAM enforces it, rather than as a policy document
   describes it
+- the state machine indexing its own applies — a listing, an intrinsic and a
+  catch, none of which a definition being valid says anything about
 
 **Not proven here: the event-history audit.** Every run in this suite passes
 `bypass_event_check=true`, because it keeps a way back into the account and the

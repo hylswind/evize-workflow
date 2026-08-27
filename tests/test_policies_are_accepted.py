@@ -43,6 +43,7 @@ def inline_documents():
         ),
         "console-self-service": policies.console_self_service_policy(account_id=ACCOUNT_ID),
         "apply-role": policies.apply_role_policy(boundary_arn=BOUNDARY_ARN),
+        "apply-state-machine": policies.apply_state_machine_policy(dashboard_bucket=DASHBOARD),
         "pass-role": policies.pass_role_policy(account_id=ACCOUNT_ID, role_name="enclavize-apply"),
     }
 
