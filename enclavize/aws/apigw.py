@@ -202,9 +202,19 @@ def delete_custom_domain(apigw, host: str) -> None:
     apigw.delete_domain_name(domainName=host)
 
 
-def delete_usage_plan(apigw, *, plan_id: str, key_id: str = None) -> None:
-    if key_id:
-        apigw.delete_usage_plan_key(usagePlanId=plan_id, keyId=key_id)
+def delete_usage_plan_key(apigw, *, plan_id: str, key_id: str) -> None:
+    """Detach one key from a plan. Its own call, because it is its own step:
+    a plan cannot go while a key is attached, and a caller that only got as far
+    as the key needs to know that much succeeded."""
+    apigw.delete_usage_plan_key(usagePlanId=plan_id, keyId=key_id)
+
+
+def delete_usage_plan(apigw, *, plan_id: str) -> None:
+    """Remove the plan itself.
+
+    Refused while any API stage is still associated, so the api this plan meters
+    has to be deleted first — deleting it is what clears the association.
+    """
     apigw.delete_usage_plan(usagePlanId=plan_id)
 
 

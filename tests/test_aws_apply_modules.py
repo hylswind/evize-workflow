@@ -148,6 +148,22 @@ def test_the_key_is_bound_to_one_stage(apigw_client):
     assert plan["apiStages"] == [{"apiId": api_id, "stage": "v1"}]
 
 
+def test_detaching_a_key_leaves_the_plan_standing(apigw_client):
+    """Two steps, not one. A plan cannot go while a key is attached, but it also
+    cannot go while the api it meters exists — so a teardown detaches the key
+    here and comes back for the plan once the api is gone."""
+    api_id = apigw.create_api(apigw_client, name="enclavize-apply-api")
+    key_id = apigw.create_api_key(apigw_client, name="enclavize-apply", value="k" * 32)
+    plan_id = apigw.attach_key_to_plan(
+        apigw_client, name="enclavize-apply-plan", api_id=api_id, stage="v1", key_id=key_id
+    )
+
+    apigw.delete_usage_plan_key(apigw_client, plan_id=plan_id, key_id=key_id)
+
+    assert apigw_client.get_usage_plan_keys(usagePlanId=plan_id)["items"] == []
+    assert apigw_client.get_usage_plan(usagePlanId=plan_id)["id"] == plan_id
+
+
 def test_the_integration_targets_start_sync_execution():
     recorded = {}
 

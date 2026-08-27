@@ -480,6 +480,14 @@ def leftovers(session, account: str, profile: Profile) -> list:
     found += [f"custom domain {d['domainName']}"
               for d in safely(lambda: apigw.get_domain_names()["items"], [])
               if d["domainName"] in enclave_hosts]
+    # Neither is reachable from outside, and neither costs anything — but a plan
+    # left behind is a teardown that did not finish, and this survey is the only
+    # thing that would say so.
+    found += [f"usage plan {p['name']}"
+              for p in safely(lambda: apigw.get_usage_plans()["items"], [])
+              if p["name"].startswith(setup_config.RESOURCES.prefix)]
+    found += [f"api key {k['name']}" for k in safely(lambda: apigw.get_api_keys()["items"], [])
+              if k["name"].startswith(setup_config.RESOURCES.prefix)]
 
     found += [f"state machine {m['name']}" for m in safely(
         lambda: session.client("stepfunctions").list_state_machines()["stateMachines"], [])

@@ -206,11 +206,18 @@ def delete_apply_api(session, profile):
                     domainName=host, basePath=m["basePath"]))
     attempt(f"custom domain {host}", lambda: apigwmod.delete_custom_domain(apigw, host))
 
+    # The api goes before the plan that meters it. A usage plan is refused while
+    # any API stage is still associated with it, and deleting the api is what
+    # clears that association — the other order can only ever fail.
+    for api in _safe(lambda: apigw.get_rest_apis()["items"], []):
+        if api["name"].startswith(SETUP_RESOURCES.prefix):
+            attempt(f"rest api {api['name']}", lambda a=api: apigwmod.delete_api(apigw, a["id"]))
+
     for plan in _safe(lambda: apigw.get_usage_plans()["items"], []):
         if plan["name"].startswith(SETUP_RESOURCES.prefix):
             for key in _safe(lambda p=plan: apigw.get_usage_plan_keys(usagePlanId=p["id"])["items"], []):
                 attempt(f"usage plan key {key['id']}",
-                        lambda p=plan, k=key: apigwmod.delete_usage_plan(
+                        lambda p=plan, k=key: apigwmod.delete_usage_plan_key(
                             apigw, plan_id=p["id"], key_id=k["id"]))
             attempt(f"usage plan {plan['name']}",
                     lambda p=plan: apigwmod.delete_usage_plan(apigw, plan_id=p["id"]))
@@ -218,10 +225,6 @@ def delete_apply_api(session, profile):
     for key in _safe(lambda: apigw.get_api_keys()["items"], []):
         if key["name"].startswith(SETUP_RESOURCES.prefix):
             attempt(f"api key {key['name']}", lambda k=key: apigwmod.delete_api_key(apigw, k["id"]))
-
-    for api in _safe(lambda: apigw.get_rest_apis()["items"], []):
-        if api["name"].startswith(SETUP_RESOURCES.prefix):
-            attempt(f"rest api {api['name']}", lambda a=api: apigwmod.delete_api(apigw, a["id"]))
 
 
 def delete_state_machines(session):

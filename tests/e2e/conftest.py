@@ -10,9 +10,10 @@ and every one of them is destructive:
   from the enclave identities and the sign-in lock by design, so it could not
   close the loop and the account would be spent after one run.
 
-test_profile.py is deliberately outside the gate: it needs no account and no
-network, so it runs in an ordinary `pytest` and keeps the parameterisation
-honest whether or not anyone has AWS set up.
+test_profile.py and test_teardown.py are deliberately outside the gate: they
+need no account and no network, so they run in an ordinary `pytest` and keep the
+parameterisation and the teardown's order honest whether or not anyone has AWS
+set up.
 """
 
 import os
