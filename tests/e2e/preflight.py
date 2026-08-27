@@ -25,6 +25,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 from enclavize.aws import domains as domainsmod  # noqa: E402
+from workflow.steps import s0_verify_email  # noqa: E402
 from harness import (  # noqa: E402
     ProfileError,
     allowed_accounts,
@@ -234,6 +235,23 @@ def check_the_root_key_secret_is_not_spent(report, profile, secrets):
     report.ok("ROOT_KEY_ID has not been spent by a later run")
 
 
+def check_root_email(report, session, profile, account):
+    """The run refuses if the root email is not at the domain. Say so here
+    instead, where it costs a command rather than a dispatch.
+
+    Reading the address at all needs an organization: nothing else in a
+    standalone account will answer, which is why creating one is a manual step.
+    """
+    try:
+        found = s0_verify_email.verify(
+            session.client("organizations"), account_id=account, domain=profile.domain
+        )
+    except SystemExit as exc:
+        report.bad(str(exc).replace("enclavize: ", ""))
+        return
+    report.ok(f"root email is at {found}, the domain this account will own")
+
+
 def check_domain(report, session, profile):
     """Membership, not an error code: `real` needs the domain elsewhere and
     `bypass` needs it here, and getting this wrong wastes a whole cycle."""
@@ -298,6 +316,7 @@ def main(argv=None):
         session = boto3.Session(region_name=args.region)
         check_root_keys(report, session, profile, arn)
         check_account_is_clean(report, session, profile, account)
+        check_root_email(report, session, profile, account)
         check_domain(report, session, profile)
     check_caller(report, profile, secrets)
     check_the_root_key_secret_is_not_spent(report, profile, secrets)

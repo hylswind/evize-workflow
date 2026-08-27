@@ -49,6 +49,23 @@ def signup():
     ]
 
 
+def preparing_the_organization(at=500):
+    """What creating one from the console really produced, in this order.
+
+    Seven events for one action: the console turns a policy type on and attaches
+    the default policy, and two service-linked roles come along with it.
+    """
+    return [
+        event("CreateServiceLinkedRole", "iam.amazonaws.com", at),
+        event("CreateOrganization", "organizations.amazonaws.com", at),
+        event("CreateServiceLinkedRole", "iam.amazonaws.com", at),
+        event("EnablePolicyType", "organizations.amazonaws.com", at + 1),
+        event("CreatePolicy", "organizations.amazonaws.com", at + 2),
+        event("CreatePolicy", "organizations.amazonaws.com", at + 4),
+        event("AttachPolicy", "organizations.amazonaws.com", at + 5),
+    ]
+
+
 def sealed(*during):
     """A full clean history: sign-up, the run's own calls, then the seal."""
     return signup() + list(during) + [
@@ -119,6 +136,28 @@ def test_a_human_creating_a_user_before_the_workflow_is_caught():
     assert not result.ok
     assert "by hand" in result.reason
     assert [e["eventName"] for e in result.unexpected] == ["CreateUser"]
+
+
+def test_preparing_the_organization_passes():
+    """A step the procedure now calls for, so its traces cannot fail the audit.
+    Without this the check would refuse every correctly prepared account."""
+    history = signup() + preparing_the_organization() + [
+        event("DeleteAccessKey", offset=7200, request_id="own-3")
+    ]
+    assert judge(history).ok
+
+
+def test_joining_somebody_elses_organization_is_still_caught():
+    """The one Organizations call that would be a way back in: a member account
+    carries a role its management account can assume. Allowing the creation of
+    an organization must not allow accepting an invitation into one."""
+    history = signup() + [
+        event("AcceptHandshake", "organizations.amazonaws.com", 500),
+        event("DeleteAccessKey", offset=7200, request_id="own-3"),
+    ]
+    result = judge(history)
+    assert not result.ok
+    assert [e["eventName"] for e in result.unexpected] == ["AcceptHandshake"]
 
 
 def test_an_unseen_signup_event_passes():

@@ -48,11 +48,31 @@ TRUSTED_SOURCES = frozenset(
     }
 )
 
-# The only credential-reachable call the operator makes by hand before the
-# workflow runs. Everything enclavize itself does is matched by request id, so
-# it deliberately does not appear here — which is what makes a person creating a
-# user or a role before the run detectable.
-PREFLIGHT_WHITELIST = frozenset({("iam.amazonaws.com", "CreateAccessKey")})
+# What the operator does by hand before the workflow runs, and nothing else.
+# Everything enclavize itself does is matched by request id, so it deliberately
+# does not appear here — which is what makes a person creating a user or a role
+# before the run detectable.
+PREFLIGHT_WHITELIST = frozenset(
+    {
+        ("iam.amazonaws.com", "CreateAccessKey"),
+        # Creating the organization: the only thing that makes the root email
+        # readable, and reading it is what proves the null MX will kill the
+        # mailbox a password reset would go to. The console does more than the
+        # API call — it turns a policy type on, creates the default policies and
+        # attaches one — and the service-linked roles arrive with it.
+        #
+        # Safe to allow because the run separately refuses an account that does
+        # not manage its own organization. That is the one thing Organizations
+        # could otherwise hand over: a member account carries a role that its
+        # management account can assume, which would be a way back in.
+        ("organizations.amazonaws.com", "CreateOrganization"),
+        ("organizations.amazonaws.com", "EnablePolicyType"),
+        ("organizations.amazonaws.com", "CreatePolicy"),
+        ("organizations.amazonaws.com", "AttachPolicy"),
+        # Assumable by one AWS service and by nobody else, so never a way in.
+        ("iam.amazonaws.com", "CreateServiceLinkedRole"),
+    }
+)
 
 # The account's history opens with these two, in this order, on every account
 # observed so far.

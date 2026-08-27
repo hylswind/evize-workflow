@@ -20,6 +20,7 @@ from enclavize.logic import github, naming, statement as statement_logic, userda
 
 from . import clients, config, credentials
 from .steps import (
+    s0_verify_email,
     s1_identities,
     s2_launch,
     s3_domain_transfer,
@@ -125,6 +126,14 @@ def run(cfg, *, res=None, log=print):
     workflow_started_at = datetime.datetime.now(datetime.timezone.utc)
     account_id = sts.account_id(root.client("sts"))
     log(f"account {account_id}")
+
+    # Still before anything is touched. The null MX only kills a mailbox that is
+    # at this domain, so an account signed up elsewhere would seal into
+    # something that merely looks sealed.
+    s0_verify_email.verify(
+        root.client("organizations"), account_id=account_id, domain=cfg.domain
+    )
+    log(f"root email is at {cfg.domain}, which this account is about to own")
 
     identities = s1_identities.create_identities(
         root.client("iam"), res=res, region=cfg.region, account_id=account_id

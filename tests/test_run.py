@@ -66,6 +66,7 @@ def journal(monkeypatch, tmp_path):
 
         return recorder
 
+    monkeypatch.setattr(run_module.s0_verify_email, "verify", step("verify_email", DOMAIN))
     monkeypatch.setattr(
         run_module.s1_identities, "create_identities",
         step("identities", {
@@ -112,6 +113,26 @@ def test_the_reversible_steps_all_precede_the_irreversible_ones(journal):
     assert order.index("transfer") < order.index("delete_root")
 
 
+def test_the_email_is_checked_before_anything_is_touched(journal):
+    """A mismatch has to cost nothing. Checked after the identities exist, the
+    account would already have been changed to learn something that should have
+    stopped the run outright."""
+    run()
+    assert names(journal)[0] == "verify_email"
+
+
+def test_a_wrong_email_domain_stops_the_run_before_it_starts(journal, monkeypatch):
+    """Sealing it would publish a null MX for a domain the mailbox does not use,
+    leaving root's password resettable behind a statement saying otherwise."""
+    def refuse(*_args, **_kwargs):
+        raise SystemExit("enclavize: this account's root email is at 'elsewhere.test'")
+
+    monkeypatch.setattr(run_module.s0_verify_email, "verify", refuse)
+    with pytest.raises(SystemExit, match="elsewhere.test"):
+        run()
+    assert names(journal) == []
+
+
 def test_the_instance_is_launched_before_the_root_key_is_deleted(journal):
     # Launching needs root, so this ordering is not a preference but a
     # requirement.
@@ -123,6 +144,7 @@ def test_the_instance_is_launched_before_the_root_key_is_deleted(journal):
 def test_the_full_order_is_what_the_seal_depends_on(journal):
     run()
     assert names(journal) == [
+        "verify_email",
         "identities",
         "transfer",
         "lock",
@@ -192,9 +214,10 @@ def test_the_console_password_is_written_before_anything_can_fail(journal, tmp_p
     written = json.loads((tmp_path / config.CONSOLE_FILE).read_text())
     assert written["password"] == "Pw1!aaaaaaaa"
     assert written["signInUrl"] == f"https://{ACCOUNT_ID}.signin.aws.amazon.com/console"
-    # Written before the account is sealed, so a later failure still leaves the
-    # operator a way in.
-    assert order.index("identities") == 0
+    # Written before the account is changed at all, so a later failure still
+    # leaves the operator a way in. Only the email check comes first, and that
+    # reads without touching anything.
+    assert order[:2] == ["verify_email", "identities"]
 
 
 # --- bypasses -------------------------------------------------------------
