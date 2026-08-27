@@ -123,7 +123,23 @@ def test_the_dashboard_is_reachable_from_outside(profile):
 def test_the_dashboard_serves_its_static_page(profile):
     code, body = fetch(f"https://{naming.dashboard_host(profile.domain)}/")
     assert code == 200
-    assert b"status.json" in body or b"<html" in body.lower()
+    assert b"<html" in body.lower()
+
+
+def test_the_page_can_reach_the_font_it_asks_for(profile):
+    """The typeface travels with the page rather than being fetched from another
+    host, which only holds if it is actually served from beside it."""
+    code, body = fetch(f"https://{naming.dashboard_host(profile.domain)}/fonts/azeret-mono.woff2")
+    assert code == 200
+    assert body[:4] == b"wOF2", body[:16]
+
+
+def test_the_dashboard_says_which_repo_this_domain_answers_to(profile):
+    """Not otherwise visible from outside a sealed account: nothing else
+    publishes the binding between a domain and the repo it applies."""
+    code, body = fetch(f"https://{naming.dashboard_host(profile.domain)}/{setup_config.STATUS_KEY}")
+    assert code == 200
+    assert json.loads(body)["appRepo"] == profile.app.repo
 
 
 # --- the proof ------------------------------------------------------------
