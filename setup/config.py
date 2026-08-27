@@ -53,6 +53,11 @@ APPLY_API_PATH = "commits"
 APPLY_STAGE = "v1"
 COMMIT_PATTERN = "^[0-9a-f]{40}$"
 
+# What an applied commit runs on. Its own constants rather than phase A's: the
+# two programs never talk, so neither can read the other's config.
+AMI_PARAM = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
+APPLY_INSTANCE_TYPE = "t3.large"
+
 
 @dataclass(frozen=True)
 class Resources:

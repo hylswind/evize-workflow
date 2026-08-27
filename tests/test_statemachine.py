@@ -11,6 +11,7 @@ from constants import APP_REPO, DOMAIN, REGION
 
 from enclavize.logic import naming
 from enclavize.logic import statemachine as sm
+from setup import config as setup_config
 
 DASHBOARD_BUCKET = "enclavize-dashboard-123456789012"
 
@@ -20,7 +21,7 @@ def definition():
         app_repo=APP_REPO,
         domain=DOMAIN,
         image_id="ami-1",
-        instance_type="t3.small",
+        instance_type=setup_config.APPLY_INSTANCE_TYPE,
         subnet_id="subnet-1",
         instance_profile="enclavize-apply",
         dashboard_bucket=DASHBOARD_BUCKET,

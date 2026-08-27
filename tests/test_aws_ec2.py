@@ -7,6 +7,7 @@ from constants import REGION, clock, no_sleep
 from moto import mock_aws
 
 from enclavize.aws import ec2 as ec2mod
+from workflow import config as workflow_config
 
 
 @pytest.fixture
@@ -42,7 +43,7 @@ def launch(client, **overrides):
         subnet_id="subnet-1",
         instance_profile="enclavize-admin",
         user_data="#!/bin/bash\n",
-        instance_type="t3.small",
+        instance_type=workflow_config.INSTANCE_TYPE,
         name_tag="enclavize-instance",
         wait_seconds=90,
         retry_interval=3,

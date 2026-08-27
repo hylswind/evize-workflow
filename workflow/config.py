@@ -37,7 +37,7 @@ INSTANCE_PROFILE_WAIT_SECONDS = 90
 INSTANCE_PROFILE_RETRY_INTERVAL = 3
 
 BASE_AMI_PARAM = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
-INSTANCE_TYPE = "t3.small"
+INSTANCE_TYPE = "t3.large"
 
 STATEMENT_FILE = "statement.json"
 BUNDLE_FILE = "bundle.jsonl"

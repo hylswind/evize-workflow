@@ -23,8 +23,6 @@ from enclavize.logic import naming
 
 from . import apply, clients, config, dashboard, proof
 
-AMI_PARAM = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
-APPLY_INSTANCE_TYPE = "t3.small"
 
 
 def env(name: str, *, required: bool = True) -> str:
@@ -136,7 +134,7 @@ def run(*, domain: str, app_repo: str, api_key: str, region: str, res=None, log=
         session.client("stepfunctions"), session.client("ec2"), session.client("ssm"),
         res=res, app_repo=app_repo, region=region, domain=domain,
         dashboard_bucket=dashboard_bucket, role_arn=roles["sfn_role_arn"],
-        ami_param=AMI_PARAM, instance_type=APPLY_INSTANCE_TYPE,
+        ami_param=config.AMI_PARAM, instance_type=config.APPLY_INSTANCE_TYPE,
     )
     _, api_id = apply.create_api(
         session.client("apigateway"), iam_client, res=res, region=region, api_key=api_key,
