@@ -150,12 +150,12 @@ def run_app_teardown(profile, *, region, assume_yes):
             print("   skipped.")
             return
 
+        # The same thing an apply instance hands setup.sh, and nothing more:
+        # a teardown written against a wider environment than its setup.sh gets
+        # would work here and fail where it matters.
         result = subprocess.run(
             ["bash", str(script)], cwd=workdir,
-            env={**os.environ,
-                 "AWS_DEFAULT_REGION": region,
-                 "ENCLAVIZE_REGION": region,
-                 "ENCLAVIZE_DOMAIN": profile.domain},
+            env={**os.environ, "ENCLAVIZE_DOMAIN": profile.domain},
         )
         print(f"   {profile.app.teardown} exited {result.returncode}")
     except subprocess.CalledProcessError as exc:

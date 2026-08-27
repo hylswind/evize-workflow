@@ -124,7 +124,6 @@ def create_state_machine(sfn_client, ec2_client, ssm_client, *, res, app_repo: s
                          instance_type: str) -> str:
     definition = statemachine.build_definition(
         app_repo=app_repo,
-        region=region,
         domain=domain,
         image_id=ec2.resolve_ami(ssm_client, ami_param),
         instance_type=instance_type,

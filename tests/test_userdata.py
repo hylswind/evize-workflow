@@ -72,28 +72,5 @@ def test_setup_installs_what_it_needs_to_run_python():
     assert "pip3 install -r requirements.txt" in script
 
 
-def test_apply_clones_the_app_repo_and_runs_its_entrypoint():
-    commit = "b" * 40
-    script = userdata.build_apply_userdata(
-        app_repo=APP_REPO, commit=commit, region=REGION, domain=DOMAIN
-    )
-    assert f"git clone https://github.com/{APP_REPO}.git" in script
-    assert f"git checkout {commit}" in script
-    assert "exec ./setup.sh" in script
-
-
-def test_apply_does_not_carry_the_api_key():
-    # An apply instance has no business holding the key that triggers applies.
-    script = userdata.build_apply_userdata(
-        app_repo=APP_REPO, commit="c" * 40, region=REGION, domain=DOMAIN
-    )
-    assert "APPLY_API_KEY" not in script
-
-
-def test_both_scripts_fail_fast():
-    scripts = [
-        setup_script(),
-        userdata.build_apply_userdata(app_repo=APP_REPO, commit="d" * 40, region=REGION, domain=DOMAIN),
-    ]
-    for script in scripts:
-        assert script.startswith("#!/bin/bash\nset -euxo pipefail")
+def test_the_script_fails_fast():
+    assert setup_script().startswith("#!/bin/bash\nset -euxo pipefail")

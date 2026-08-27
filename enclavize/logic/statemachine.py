@@ -44,7 +44,6 @@ ResultPath is what keeps the launch's own output alive for Done to answer with.
 def build_definition(
     *,
     app_repo: str,
-    region: str,
     domain: str,
     image_id: str,
     instance_type: str,
@@ -61,6 +60,11 @@ def build_definition(
     """
     # PLACEHOLDER marks where the commit is substituted; everything else is
     # literal text that escape_for_format has to protect.
+    #
+    # The domain is the whole of what an application is handed, because it is the
+    # whole of what an application cannot work out for itself. A region would say
+    # enclavize can be pointed at more than one, and it cannot; the commit is
+    # already what the repo was checked out at.
     user_data_template = "\n".join(
         [
             "#!/bin/bash",
@@ -71,10 +75,7 @@ def build_definition(
             "cd /opt/app",
             f"git checkout {PLACEHOLDER}",
             "set +x",
-            f"export AWS_DEFAULT_REGION={region}",
-            f"export ENCLAVIZE_REGION={region}",
             f"export ENCLAVIZE_DOMAIN={domain}",
-            f"export ENCLAVIZE_COMMIT={PLACEHOLDER}",
             "exec ./setup.sh",
             "",
         ]
@@ -95,7 +96,7 @@ def build_definition(
                     "at.$": "$$.State.EnteredTime",
                     "userData.$": (
                         f"States.Base64Encode(States.Format('{escape_for_format(user_data_template)}', "
-                        "$.commit, $.commit))"
+                        "$.commit))"
                     ),
                 },
                 "Next": "LaunchInstance",

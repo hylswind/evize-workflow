@@ -18,7 +18,6 @@ DASHBOARD_BUCKET = "enclavize-dashboard-123456789012"
 def definition():
     return sm.build_definition(
         app_repo=APP_REPO,
-        region=REGION,
         domain=DOMAIN,
         image_id="ami-1",
         instance_type="t3.small",
@@ -59,9 +58,10 @@ def test_a_backslash_is_escaped_before_anything_else():
 
 def test_the_commit_is_substituted_where_the_script_needs_it():
     expression = user_data_expression()
-    # Once to check out, once to export for the app.
-    assert expression.count("{}") == 2
-    assert expression.endswith("$.commit, $.commit))")
+    # Once, to check the repo out. The app is not handed the commit separately:
+    # it is already sitting at it.
+    assert expression.count("{}") == 1
+    assert expression.endswith("$.commit))")
 
 
 def test_the_user_data_is_base64_encoded_because_run_instances_expects_that():
@@ -74,9 +74,28 @@ def test_the_script_clones_the_app_repo_and_runs_its_entrypoint():
     assert "exec ./setup.sh" in expression
 
 
+def test_the_script_fails_fast():
+    assert "#!/bin/bash\nset -euxo pipefail" in user_data_expression()
+
+
+def test_an_apply_instance_does_not_carry_the_api_key():
+    """It has no business holding the key that triggers applies: a commit that
+    could read it could apply another one."""
+    assert "APPLY_API_KEY" not in user_data_expression()
+
+
 def test_the_script_stops_tracing_before_exporting_anything():
     expression = user_data_expression()
-    assert expression.index("set +x") < expression.index("export ENCLAVIZE_COMMIT")
+    assert expression.index("set +x") < expression.index("export ENCLAVIZE_DOMAIN")
+
+
+def test_the_domain_is_all_an_application_is_handed():
+    """The contract the README states, pinned here. A region would advertise
+    something enclavize cannot vary, and the commit is already what the repo was
+    checked out at — so neither belongs in an application's environment."""
+    exported = [line for line in user_data_expression().splitlines()
+                if line.startswith("export ")]
+    assert exported == [f"export ENCLAVIZE_DOMAIN={DOMAIN}"]
 
 
 def test_it_launches_with_the_bounded_apply_profile():
