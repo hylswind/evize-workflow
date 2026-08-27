@@ -114,8 +114,7 @@ asks as root or as an administrator, and CloudTrail redacts the address out of
 the sign-up event. `DescribeOrganization` takes no arguments, so there is no own
 account id for it to refuse — it simply names the management account and its
 email. With the organization in place, the run reads that address and stops if it
-is not at `domain`, before touching anything. Without it, the run stops too, and
-says to do this.
+is not at `domain`. Without it, the run stops too, and says to do this.
 
 ## 3. The five secrets
 
@@ -313,14 +312,13 @@ is refused with **400**, and a wrong key with **403**; neither starts anything.
 
 ## What the sealing run does
 
-Everything reversible happens first, so a wrong password or an unreachable
-GitHub fails while the account can still be used normally.
+The order is the security property. Everything reversible happens first.
 
 1. Resolve the application repo's numeric id.
 2. **Check the root email is at this domain**, by reading the organization's
    management account. The null MX kills a mailbox only if the mailbox is there;
    an account signed up elsewhere would seal into something that merely looks
-   sealed. Nothing has been touched yet, so a mismatch costs nothing.
+   sealed.
 3. Create the identities that outlive root: an admin role only EC2 can assume,
    an event reader, a starter, and a console user that can see billing and the
    *shape* of the account — which resources exist — but not what is inside them.
