@@ -23,6 +23,7 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -31,12 +32,15 @@ from dataclasses import dataclass, field
 import boto3
 import yaml
 
-from enclavize.aws import signin as signinmod
-from enclavize.logic import github, naming
+# The teardown lives outside this suite: an account can need taking apart
+# without any of it. Both are described in one place so they cannot disagree.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "scripts"))
+import dismantle  # noqa: E402
+
+from enclavize.logic import github
 
 # Imported, never retyped. A renamed resource has to break these tests rather
 # than leave them asserting against something that no longer exists.
-from setup import config as setup_config
 from workflow import config as workflow_config
 
 PREDICATE_TYPE = workflow_config.PREDICATE_TYPE
@@ -412,98 +416,8 @@ def unfit_to_unseal(arn: str, region: str) -> str:
 def leftovers(session, account: str, profile: Profile) -> list:
     """Everything of the enclave's that is still standing.
 
-    One description, used both by the teardown to report what it failed to
-    remove and by preflight to refuse a cycle that would trip over it. Two
-    descriptions drift, and they drift in the direction that matters: a
-    teardown saying all-clear while preflight refuses, or the reverse.
-
-    Ownership is judged the way each service allows — a creation stamp where
-    the resource carries one, the resource prefix where it does not — never by
-    the domain alone, because an account that has registered the domain already
-    has a zone holding whatever its owner set up.
+    The same description the teardown reports against, so the two cannot
+    disagree about whether a cycle may start. It lives in scripts/dismantle.py
+    because an account can need taking apart without any of this suite.
     """
-    found = []
-
-    def safely(call, default):
-        try:
-            return call()
-        except Exception:  # noqa: BLE001 - surveying must not be what fails
-            return default
-
-    for statement in safely(
-        lambda: signinmod.list_statements(
-            session.client("signin", region_name=signinmod.WRITE_REGION)), []):
-        found.append(f"sign-in statement {signinmod.statement_id(statement)}")
-
-    iam = session.client("iam")
-    for kind, call, key in (
-        ("role", lambda: iam.list_roles()["Roles"], "RoleName"),
-        ("user", lambda: iam.list_users()["Users"], "UserName"),
-        ("instance profile", lambda: iam.list_instance_profiles()["InstanceProfiles"],
-         "InstanceProfileName"),
-        ("policy", lambda: iam.list_policies(Scope="Local")["Policies"], "PolicyName"),
-    ):
-        found += [f"{kind} {item[key]}" for item in safely(call, [])
-                  if item[key].startswith(workflow_config.RESOURCES.prefix)]
-
-    s3 = session.client("s3")
-    found += [f"bucket {b['Name']}" for b in safely(lambda: s3.list_buckets()["Buckets"], [])
-              if b["Name"] in (naming.proof_bucket_name(account),
-                               naming.dashboard_bucket_name(account))]
-
-    enclave_hosts = {naming.dashboard_host(profile.domain), naming.proof_host(profile.domain),
-                     naming.apply_host(profile.domain)}
-    acm = session.client("acm")
-    for page in safely(lambda: list(acm.get_paginator("list_certificates").paginate()), []):
-        found += [f"certificate {c['DomainName']}" for c in page["CertificateSummaryList"]
-                  if c["DomainName"] in enclave_hosts]
-
-    cf = session.client("cloudfront")
-    for page in safely(lambda: list(cf.get_paginator("list_distributions").paginate()), []):
-        for item in page.get("DistributionList", {}).get("Items", []):
-            if set((item.get("Aliases") or {}).get("Items") or []) & enclave_hosts:
-                found.append(f"distribution {item['Id']}")
-    for page in safely(
-            lambda: list(cf.get_paginator("list_origin_access_controls").paginate()), []):
-        found += [f"origin access control {o['Name']}"
-                  for o in page.get("OriginAccessControlList", {}).get("Items", [])
-                  if naming.is_ours(o["Name"])]
-
-    r53 = session.client("route53")
-    found += [f"hosted zone {z['Id'].split('/')[-1]}"
-              for z in safely(lambda: r53.list_hosted_zones()["HostedZones"], [])
-              if z["Name"].rstrip(".") == profile.domain and naming.is_ours(z.get("CallerReference"))]
-
-    apigw = session.client("apigateway")
-    found += [f"rest api {a['name']}" for a in safely(lambda: apigw.get_rest_apis()["items"], [])
-              if a["name"].startswith(setup_config.RESOURCES.prefix)]
-    found += [f"custom domain {d['domainName']}"
-              for d in safely(lambda: apigw.get_domain_names()["items"], [])
-              if d["domainName"] in enclave_hosts]
-    # Neither is reachable from outside, and neither costs anything — but a plan
-    # left behind is a teardown that did not finish, and this survey is the only
-    # thing that would say so.
-    found += [f"usage plan {p['name']}"
-              for p in safely(lambda: apigw.get_usage_plans()["items"], [])
-              if p["name"].startswith(setup_config.RESOURCES.prefix)]
-    found += [f"api key {k['name']}" for k in safely(lambda: apigw.get_api_keys()["items"], [])
-              if k["name"].startswith(setup_config.RESOURCES.prefix)]
-
-    found += [f"state machine {m['name']}" for m in safely(
-        lambda: session.client("stepfunctions").list_state_machines()["stateMachines"], [])
-        if m["name"].startswith(setup_config.RESOURCES.prefix)]
-
-    ec2 = session.client("ec2")
-    for reservation in safely(lambda: ec2.describe_instances(Filters=[
-        {"Name": "tag:Name", "Values": [f"{workflow_config.RESOURCES.prefix}*"]},
-        {"Name": "instance-state-name", "Values": ["pending", "running", "stopped"]},
-    ])["Reservations"], []):
-        found += [f"instance {i['InstanceId']}" for i in reservation["Instances"]]
-    found += [f"anchor vpc {v['VpcId']}" for v in safely(lambda: ec2.describe_vpcs(Filters=[
-        {"Name": "tag:Name", "Values": [workflow_config.RESOURCES.signin_lock_vpc_tag]}])["Vpcs"], [])]
-
-    if safely(lambda: session.client("ssm").get_parameter(
-            Name=workflow_config.RESOURCES.go_param), None):
-        found.append(f"go flag {workflow_config.RESOURCES.go_param}")
-
-    return found
+    return dismantle.still_standing(session, account, profile.domain)

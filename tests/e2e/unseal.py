@@ -1,14 +1,16 @@
-"""Undo a run, so the account can be used for the next one.
+"""Undo an end-to-end cycle, so the account can be used for the next one.
 
     ENCLAVIZE_E2E_PROFILE=tests/e2e/profiles/mine.yml \
     ENCLAVIZE_TEST_ACCOUNTS=111122223333 \
       python tests/e2e/unseal.py [--yes] [--send-domain-back <account-id>]
 
-This is what makes the cycle repeatable, and it is the slow part: disabling a
-CloudFront distribution and waiting for the change to reach the edge takes
-roughly twenty minutes, and nothing else can be deleted until it has. Every step
-tolerates its target already being gone, so a run that dies partway can simply
-be run again.
+What this adds over `scripts/cleanup.py` is the profile: the application's own
+teardown script, and an allow-list of accounts this may be pointed at. Every
+delete step itself is scripts/dismantle.py's, shared so the two cannot drift.
+
+It is the slow part of a cycle: disabling a CloudFront distribution and waiting
+for the change to reach the edge takes roughly twenty minutes, and nothing else
+can be deleted until it has.
 
 Needs credentials that outlive the seal and are not capped by the apply
 boundary: root, or an admin IAM user created before the run. Sign-in policies
@@ -27,67 +29,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 
 import boto3
-from botocore.exceptions import ClientError
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "scripts"))
 
-from enclavize.aws import acm as acmmod  # noqa: E402
-from enclavize.aws import apigw as apigwmod  # noqa: E402
-from enclavize.aws import cdn as cdnmod  # noqa: E402
-from enclavize.aws import dns as dnsmod  # noqa: E402
-from enclavize.aws import domains as domainsmod  # noqa: E402
-from enclavize.aws import ec2 as ec2mod  # noqa: E402
-from enclavize.aws import iam as iammod  # noqa: E402
-from enclavize.aws import s3 as s3mod  # noqa: E402
-from enclavize.aws import sfn as sfnmod  # noqa: E402
-from enclavize.aws import signin as signinmod  # noqa: E402
-from enclavize.aws import ssm as ssmmod  # noqa: E402
-from enclavize.logic import naming  # noqa: E402
-from harness import allowed_accounts, leftovers, load_profile, unfit_to_unseal  # noqa: E402
-from setup import config as setup_config  # noqa: E402
-from workflow import config as workflow_config  # noqa: E402
-
-RESOURCES = workflow_config.RESOURCES
-SETUP_RESOURCES = setup_config.RESOURCES
-
-DISTRIBUTION_POLL_MAX = 2400
-DISTRIBUTION_POLL_INTERVAL = 30
-
-# A distribution hands its certificate back well after it is itself gone.
-CERTIFICATE_RELEASE_ATTEMPTS = 20
-CERTIFICATE_RELEASE_INTERVAL = 30
-
-
-def step(message):
-    print(f"\n== {message}")
-
-
-def attempt(what, action):
-    """Run one deletion, reporting rather than raising. Everything here is
-    'remove it if it is there', and a half-finished teardown must be re-runnable.
-    """
-    try:
-        action()
-        print(f"   deleted {what}")
-        return True
-    except ClientError as exc:
-        code = exc.response.get("Error", {}).get("Code", "")
-        # Absence only. A malformed request is not the same as a thing that has
-        # already gone, and reporting it as one would have the survey below call
-        # the account clean.
-        if code in ("NoSuchEntity", "NoSuchBucket", "NotFoundException", "NoSuchDistribution",
-                    "ResourceNotFoundException", "ParameterNotFound", "NoSuchHostedZone"):
-            print(f"   (already gone) {what}")
-        else:
-            print(f"   COULD NOT delete {what}: {exc}")
-        return False
-    except Exception as exc:  # noqa: BLE001
-        print(f"   COULD NOT delete {what}: {exc}")
-        return False
+import dismantle  # noqa: E402
+from harness import allowed_accounts, load_profile, unfit_to_unseal  # noqa: E402
 
 
 def check_account(session):
@@ -164,268 +114,6 @@ def run_app_teardown(profile, *, region, assume_yes):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-# --- enclavize's own ------------------------------------------------------
-
-
-def terminate_instances(session):
-    """Only the ones enclavize launched, by the name it tagged them with.
-
-    An account may be running things of its own, and an application's instances
-    are its teardown's business — they are reported at the end if it misses any.
-    """
-    ec2 = session.client("ec2")
-    live = [
-        instance["InstanceId"]
-        for reservation in ec2.describe_instances(
-            Filters=[
-                {"Name": "tag:Name", "Values": [f"{RESOURCES.prefix}*"]},
-                {"Name": "instance-state-name", "Values": ["pending", "running", "stopped"]},
-            ]
-        )["Reservations"]
-        for instance in reservation["Instances"]
-    ]
-    if not live:
-        print("   (none of the enclave's own running)")
-        return
-    if not attempt(f"{len(live)} instance(s)", lambda: ec2.terminate_instances(InstanceIds=live)):
-        return
-    # Waited out rather than fired and forgotten: an instance keeps hold of its
-    # security groups until it has actually gone, and the application's teardown
-    # runs next expecting to delete the ones it attached.
-    print("   waiting for them to go, so the groups they hold are released")
-    _safe(lambda: ec2.get_waiter("instance_terminated").wait(InstanceIds=live), None)
-
-
-def delete_apply_api(session, profile):
-    apigw = session.client("apigateway")
-    host = naming.apply_host(profile.domain)
-
-    for mapping in _safe(lambda: apigw.get_base_path_mappings(domainName=host)["items"], []):
-        attempt(f"base path mapping /{mapping['basePath']}",
-                lambda m=mapping: apigw.delete_base_path_mapping(
-                    domainName=host, basePath=m["basePath"]))
-    attempt(f"custom domain {host}", lambda: apigwmod.delete_custom_domain(apigw, host))
-
-    # The api goes before the plan that meters it. A usage plan is refused while
-    # any API stage is still associated with it, and deleting the api is what
-    # clears that association — the other order can only ever fail.
-    for api in _safe(lambda: apigw.get_rest_apis()["items"], []):
-        if api["name"].startswith(SETUP_RESOURCES.prefix):
-            attempt(f"rest api {api['name']}", lambda a=api: apigwmod.delete_api(apigw, a["id"]))
-
-    for plan in _safe(lambda: apigw.get_usage_plans()["items"], []):
-        if plan["name"].startswith(SETUP_RESOURCES.prefix):
-            for key in _safe(lambda p=plan: apigw.get_usage_plan_keys(usagePlanId=p["id"])["items"], []):
-                attempt(f"usage plan key {key['id']}",
-                        lambda p=plan, k=key: apigwmod.delete_usage_plan_key(
-                            apigw, plan_id=p["id"], key_id=k["id"]))
-            attempt(f"usage plan {plan['name']}",
-                    lambda p=plan: apigwmod.delete_usage_plan(apigw, plan_id=p["id"]))
-
-    for key in _safe(lambda: apigw.get_api_keys()["items"], []):
-        if key["name"].startswith(SETUP_RESOURCES.prefix):
-            attempt(f"api key {key['name']}", lambda k=key: apigwmod.delete_api_key(apigw, k["id"]))
-
-
-def delete_state_machines(session):
-    sfn = session.client("stepfunctions")
-    for machine in _safe(lambda: sfn.list_state_machines()["stateMachines"], []):
-        if machine["name"].startswith(SETUP_RESOURCES.prefix):
-            attempt(f"state machine {machine['name']}",
-                    lambda m=machine: sfnmod.delete_state_machine(sfn, m["stateMachineArn"]))
-
-
-def delete_distributions(session, profile):
-    """Both together. Disabling one takes about twenty minutes to reach the
-    edge, and doing them in turn would cost that twice.
-
-    Only the enclave's own, matched by the names they answer for. An account
-    may well have distributions of its own, and this is the step that cannot be
-    undone by re-running anything.
-    """
-    cf = session.client("cloudfront")
-    ours = {naming.dashboard_host(profile.domain), naming.proof_host(profile.domain)}
-    items, skipped = [], []
-    for page in cf.get_paginator("list_distributions").paginate():
-        for item in page.get("DistributionList", {}).get("Items", []):
-            aliases = set((item.get("Aliases") or {}).get("Items") or [])
-            (items if aliases & ours else skipped).append(item)
-
-    for item in skipped:
-        print(f"   leaving {item['Id']} alone; it serves {sorted(set((item.get('Aliases') or {}).get('Items') or [])) or 'no enclave name'}")
-    if not items:
-        print("   (none of the enclave's own)")
-        return
-
-    for item in items:
-        if item["Enabled"]:
-            attempt(f"disable {item['Id']}", lambda i=item: cdnmod.disable(cf, i["Id"]))
-        else:
-            print(f"   {item['Id']} already disabled")
-
-    print(f"   waiting for {len(items)} distribution(s) to redeploy — this is the slow part")
-    for item in items:
-        if not cdnmod.await_deployed(cf, item["Id"], poll_max=DISTRIBUTION_POLL_MAX,
-                                     interval=DISTRIBUTION_POLL_INTERVAL):
-            print(f"   {item['Id']} has not finished; re-run unseal.py to pick up from here")
-    for item in items:
-        attempt(f"distribution {item['Id']}", lambda i=item: cdnmod.delete(cf, i["Id"]))
-
-
-def delete_origin_access_controls(session):
-    """A step of its own, because they outlive the distributions that used them.
-
-    A bring-up that died before creating any distribution still leaves these
-    behind, so this cannot sit behind whether there were distributions to
-    remove — which is the case that leaves them stranded.
-    """
-    cf = session.client("cloudfront")
-    found_any = False
-    for page in _safe(lambda: list(cf.get_paginator("list_origin_access_controls").paginate()), []):
-        for found in page.get("OriginAccessControlList", {}).get("Items", []):
-            if naming.is_ours(found["Name"]):
-                found_any = True
-                attempt(f"origin access control {found['Name']}",
-                        lambda i=found["Id"]: cdnmod.delete_origin_access_control(cf, i))
-    if not found_any:
-        print("   (none of the enclave's own)")
-
-
-def delete_certificates(session, profile):
-    """After the distributions: ACM refuses to delete one still in use."""
-    acm = session.client("acm")
-    wanted = {naming.dashboard_host(profile.domain), naming.proof_host(profile.domain),
-              naming.apply_host(profile.domain)}
-    for page in acm.get_paginator("list_certificates").paginate():
-        for certificate in page["CertificateSummaryList"]:
-            if certificate["DomainName"] in wanted:
-                _delete_certificate_when_released(acm, certificate)
-
-
-def _delete_certificate_when_released(acm, certificate):
-    """Retried, because a distribution releases its certificate long after it
-    has itself been deleted. ACM answers ResourceInUseException in the gap."""
-    name, arn = certificate["DomainName"], certificate["CertificateArn"]
-    for remaining in range(CERTIFICATE_RELEASE_ATTEMPTS, 0, -1):
-        try:
-            acmmod.delete_certificate(acm, arn)
-            print(f"   deleted certificate for {name}")
-            return
-        except ClientError as exc:
-            if exc.response.get("Error", {}).get("Code") != "ResourceInUseException":
-                print(f"   COULD NOT delete certificate for {name}: {exc}")
-                return
-            if remaining == 1:
-                print(f"   certificate for {name} is still in use; re-run unseal.py to finish")
-                return
-            print(f"   certificate for {name} still in use, waiting for CloudFront to release it")
-            time.sleep(CERTIFICATE_RELEASE_INTERVAL)
-
-
-def delete_buckets(session, account):
-    s3 = session.client("s3")
-    for bucket in (naming.proof_bucket_name(account), naming.dashboard_bucket_name(account)):
-        attempt(f"bucket {bucket}", lambda b=bucket: s3mod.delete_bucket(s3, b))
-
-
-def delete_zone(session, profile):
-    """Only zones this program created, identified by their creation stamp.
-
-    A domain that has ever been registered here already has a zone, and it is
-    the one holding whatever mail and records the owner set up. Matching on the
-    domain name alone would take that one.
-    """
-    r53 = session.client("route53")
-    named = [z for z in _safe(lambda: r53.list_hosted_zones()["HostedZones"], [])
-             if z["Name"].rstrip(".") == profile.domain]
-    ours = [z for z in named if naming.is_ours(z.get("CallerReference"))]
-
-    for zone in named:
-        if zone not in ours:
-            print(f"   leaving {zone['Id'].split('/')[-1]} alone; not created by enclavize")
-    if not ours:
-        print("   (no hosted zone of the enclave's own)")
-        return
-
-    # delete_zone empties the zone first; the apex NS and SOA go with it.
-    for zone in ours:
-        zone_id = zone["Id"].split("/")[-1]
-        attempt(f"hosted zone {zone_id}", lambda z=zone_id: dnsmod.delete_zone(r53, z))
-
-
-def delete_identities(session):
-    """Swept by prefix rather than by a list of names.
-
-    Two roles carry an instance profile, not one, and a role inside a profile
-    cannot be deleted — so profiles go first, and every one of them. Sweeping
-    also means a name added to either phase's config is removed here without
-    this function having to learn about it.
-    """
-    iam = session.client("iam")
-    prefix = RESOURCES.prefix
-
-    for page in iam.get_paginator("list_instance_profiles").paginate():
-        for found in page["InstanceProfiles"]:
-            if found["InstanceProfileName"].startswith(prefix):
-                attempt(f"instance profile {found['InstanceProfileName']}",
-                        lambda n=found["InstanceProfileName"]: iammod.delete_instance_profile(iam, name=n))
-
-    for page in iam.get_paginator("list_roles").paginate():
-        for found in page["Roles"]:
-            if found["RoleName"].startswith(prefix):
-                attempt(f"role {found['RoleName']}",
-                        lambda r=found["RoleName"]: iammod.delete_role(iam, role=r))
-
-    for page in iam.get_paginator("list_users").paginate():
-        for found in page["Users"]:
-            if found["UserName"].startswith(prefix):
-                attempt(f"user {found['UserName']}",
-                        lambda u=found["UserName"]: iammod.delete_user(iam, user=u))
-
-    for page in iam.get_paginator("list_policies").paginate(Scope="Local"):
-        for found in page["Policies"]:
-            if found["PolicyName"].startswith(prefix):
-                attempt(f"policy {found['PolicyName']}",
-                        lambda a=found["Arn"]: iammod.delete_policy(iam, policy_arn=a))
-
-
-def unlock_console(session, account):
-    signin = session.client("signin", region_name=signinmod.WRITE_REGION)
-    statements = _safe(lambda: signinmod.list_statements(signin), [])
-    if not statements:
-        print("   (no sign-in statements)")
-    for statement in statements:
-        sid = signinmod.statement_id(statement)
-        attempt(f"sign-in statement {sid}",
-                lambda s=sid: signinmod.disable_lock(signin, account_id=account, statement_id=s))
-
-
-def delete_anchor_vpcs(session):
-    ec2 = session.client("ec2")
-    for vpc in _safe(lambda: ec2.describe_vpcs(
-            Filters=[{"Name": "tag:Name", "Values": [RESOURCES.signin_lock_vpc_tag]}])["Vpcs"], []):
-        attempt(f"anchor vpc {vpc['VpcId']}", lambda v=vpc: ec2mod.delete_vpc(ec2, v["VpcId"]))
-
-
-def send_domain_back(session, profile, target):
-    """The half of a transfer this account can perform. The other half —
-    accepting it — has to happen on the spare account."""
-    response = session.client("route53domains", region_name=domainsmod.REGION) \
-        .transfer_domain_to_another_aws_account(DomainName=profile.domain, AccountId=target)
-    print(f"\n== {profile.domain} offered to {target}")
-    print(f"   password: {response['Password']}")
-    print("   Accept it from that account within three days, or AWS cancels the transfer:")
-    print("     aws route53domains accept-domain-transfer-from-another-aws-account \\")
-    print(f"       --domain-name {profile.domain} --password '{response['Password']}' --region us-east-1")
-
-
-def _safe(call, default):
-    try:
-        return call()
-    except Exception:  # noqa: BLE001 - surveying must never be the thing that fails
-        return default
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", default=os.environ.get("ENCLAVIZE_E2E_PROFILE"))
@@ -448,67 +136,18 @@ def main(argv=None):
     if not args.yes and input("continue? [y/N] ").strip().lower() != "y":
         return 1
 
-    # Before the application's teardown, not after. The instance an apply runs
-    # on belongs to enclavize — its state machine launched it — but it carries
-    # the security groups the application attached, and those cannot be deleted
-    # while anything still holds them. The application cannot remove an instance
-    # it did not create, so this has to go first.
-    step("instances")
-    terminate_instances(session)
-
-    step("the application's own resources")
-    run_app_teardown(profile, region=args.region, assume_yes=args.yes)
-
-    step("the apply API")
-    delete_apply_api(session, profile)
-
-    step("the state machine")
-    delete_state_machines(session)
-
-    step("the distributions")
-    delete_distributions(session, profile)
-
-    step("the origin access controls")
-    delete_origin_access_controls(session)
-
-    step("the buckets")
-    delete_buckets(session, account)
-
-    step("the hosted zone")
-    delete_zone(session, profile)
-
-    step("the identities")
-    delete_identities(session)
-
-    step("the console lock")
-    unlock_console(session, account)
-
-    step("the anchor VPC")
-    delete_anchor_vpcs(session)
-
-    # Last of the deletions: CloudFront hands a certificate back well after the
-    # distribution using it is gone, so everything independent of ACM happens
-    # first and this waits out whatever is left.
-    step("the certificate")
-    delete_certificates(session, profile)
-
-    step("the go flag")
-    attempt(RESOURCES.go_param,
-            lambda: ssmmod.delete_parameter(session.client("ssm"), RESOURCES.go_param))
+    dismantle.everything(
+        session, account, profile.domain,
+        after_instances=lambda: run_app_teardown(
+            profile, region=args.region, assume_yes=args.yes),
+    )
 
     if args.send_domain_back:
-        send_domain_back(session, profile, args.send_domain_back)
+        dismantle.send_domain_back(session, profile.domain, args.send_domain_back)
 
-    remaining = leftovers(session, account, profile)
-    print("\n== still standing")
-    if remaining:
-        for item in remaining:
-            print(f"   {item}")
-        print("\n   Remove these before the next cycle; preflight will refuse until it is clean.")
-    else:
-        print("   nothing. The account is ready for another run.")
+    dismantle.report(session, account, profile.domain)
 
-    print(f"\nThe console is open again for {RESOURCES.console_user}; your own credentials are untouched.")
+    print("\nThe sign-in lock is gone; the console signs in normally again.")
     print("This account can never pass the event audit again — which is the audit working,")
     print("not a flaw: a way back in is exactly what enclavize is meant to leave nobody.")
     return 0

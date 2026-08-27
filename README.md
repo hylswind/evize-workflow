@@ -471,10 +471,20 @@ in an ordinary `pytest`: `test_profile.py` covers the profile schema and the
 derivation of the signer workflow from a caller, and `test_teardown.py` covers
 the order the teardown removes things in.
 
-## Recovering
+## Debugging a run
 
-If a run dies with the console locked, sign-in policies never apply to API calls,
-so any credential that reaches the API can undo it:
+**Everything here needs a credential that survived the seal** — a second root
+key, or an admin IAM user created before the run. You have one only if you made
+one beforehand on purpose. Do that while developing; never for a real run, where
+being able to get back in is exactly what must not be true.
+
+Keeping one also means the account can never pass the audit. A second root key
+is a second `CreateAccessKey` where the check permits one, an admin user is an
+`iam:CreateUser` on no allow-list, and every call you then make is a root event
+carrying no request id enclavize recorded.
+
+With such a credential the console lock is no obstacle: sign-in policies gate
+interactive sign-in and never a signed API call, so it can always be undone.
 
 ```
 aws signin delete-console-authorization-configuration --target-id <account> --region us-east-1
@@ -482,5 +492,17 @@ aws signin list-resource-permission-statements --region us-east-1
 aws signin delete-resource-permission-statement --statement-id <id> --region us-east-1
 ```
 
-If the root key is already gone, the account cannot be recovered — that is the
-point. Run the workflow again on a fresh account.
+To take a whole run apart — a seal its audit refused, a bring-up that died
+halfway, an account you want back:
+
+```
+python scripts/cleanup.py
+```
+
+It needs nothing but those credentials. The domain is read from the account, and
+it names the account and makes you type the id back before removing anything. It
+removes what enclavize built and lists what it did not: an application's own
+resources are its own teardown's business.
+
+Without such a credential none of this is available, and the account cannot be
+recovered. Run the workflow again on a fresh one.

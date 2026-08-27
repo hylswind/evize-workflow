@@ -1,6 +1,8 @@
 """The order a teardown removes things in, and what it looks for afterwards.
 
-Outside the ENCLAVIZE_E2E gate, like test_profile.py: no account, no network.
+The steps live in scripts/dismantle.py; this is the only place their order is
+pinned. Outside the ENCLAVIZE_E2E gate, like test_profile.py: no account, no
+network.
 
 Both tests here are regressions from one run. Deleting the usage plan before the
 api it meters can only ever fail — AWS refuses a plan while an API stage is still
@@ -10,7 +12,7 @@ plans, which is the failure that actually costs something: the next cycle would
 have started against an account preflight had called ready.
 """
 
-import unseal
+import dismantle
 from harness import App, Profile, leftovers
 
 APIGW = "apigateway"
@@ -59,7 +61,7 @@ class Session:
 
 def torn_down():
     apigw = FakeApiGateway()
-    unseal.delete_apply_api(Session(apigw), PROFILE)
+    dismantle.delete_apply_api(Session(apigw), PROFILE.domain)
     return apigw.calls
 
 
