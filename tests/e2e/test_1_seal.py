@@ -190,7 +190,7 @@ def test_the_wrong_predicate_type_is_rejected(sealed, profile, caller):
 # --- the console credentials ----------------------------------------------
 
 
-def test_the_console_archive_needs_its_password(sealed):
+def test_the_console_archive_needs_its_password(sealed, account_id):
     """7z with an empty password writes a readable archive, and this one is a
     public artifact holding a console password."""
     password = os.environ.get("ENCLAVIZE_CONSOLE_ZIP_PASSWORD")
@@ -209,8 +209,11 @@ def test_the_console_archive_needs_its_password(sealed):
     subprocess.run(("7z", "x", f"-p{password}", f"-o{out}", "-y", str(archive)),
                    capture_output=True, check=True)
     credentials = json.loads((out / workflow_config.CONSOLE_FILE).read_text())
-    assert credentials["accountId"] and credentials["userName"] and credentials["password"]
-    assert credentials["signInUrl"].startswith(f"https://{credentials['accountId']}.")
+    # Where, as whom, with what — and nothing else, so there is less to keep
+    # true and less to leak if the password ever escapes its archive.
+    assert set(credentials) == {"signInUrl", "userName", "password"}
+    assert all(credentials.values())
+    assert credentials["signInUrl"] == f"https://{account_id}.signin.aws.amazon.com/console"
 
 
 # --- what the account looks like now --------------------------------------

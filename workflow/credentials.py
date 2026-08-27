@@ -9,20 +9,16 @@ part of the signed statement.
 import json
 
 
-def build_console_credentials(*, account_id: str, user_name: str, password: str, domain: str) -> dict:
+def build_console_credentials(*, account_id: str, user_name: str, password: str) -> dict:
+    """Only what signing in needs: where, as whom, with what.
+
+    The account id is in the sign-in URL already, and what this user can see
+    once inside is the README's to describe rather than this file's.
+    """
     return {
         "signInUrl": f"https://{account_id}.signin.aws.amazon.com/console",
-        "accountId": account_id,
         "userName": user_name,
         "password": password,
-        "dashboard": f"https://dashboard.{domain}",
-        "note": (
-            "Billing, plus a view of which resources exist — not what is inside them. "
-            "This account can list a bucket but cannot open an object, and cannot read "
-            "a secret, a parameter or a database item. You will be asked to change this "
-            "password on first sign-in. Console sign-in is restricted to this user; "
-            "nothing else in the account can reach the console."
-        ),
     }
 
 

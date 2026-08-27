@@ -139,7 +139,6 @@ def run(cfg, *, res=None, log=print):
             account_id=account_id,
             user_name=res.console_user,
             password=identities["console_password"],
-            domain=cfg.domain,
         ),
     )
     log(f"wrote {config.CONSOLE_FILE}")
