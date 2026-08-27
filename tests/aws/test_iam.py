@@ -133,9 +133,13 @@ def test_the_generated_password_satisfies_the_account_policy(iam, resources, cle
     iammod.create_user(iam, name=user)
     cleanup["users"].append(user)
 
-    iammod.create_login_profile(iam, user=user, password=iammod.generate_password())
+    iammod.create_login_profile(
+        iam, user=user, password=iammod.generate_password(), reset_required=False
+    )
 
-    assert iam.get_login_profile(UserName=user)["LoginProfile"]["PasswordResetRequired"] is True
+    # The password is random and arrives encrypted, so the operator is not made
+    # to change it — only allowed to, by the self-service policy above.
+    assert iam.get_login_profile(UserName=user)["LoginProfile"]["PasswordResetRequired"] is False
 
 
 def test_the_starter_policy_is_accepted_with_a_bucket_that_does_not_exist_yet(
@@ -218,7 +222,8 @@ def test_deleting_a_user_clears_everything_that_would_block_it(iam, resources, c
     iammod.create_access_key(iam, user=user)
     iammod.put_user_policy(iam, user=user, name="p", document=policies.event_reader_policy())
     iammod.attach_user_policy(iam, user=user, policy_arn=policies.VIEW_ONLY_MANAGED_POLICY)
-    iammod.create_login_profile(iam, user=user, password=iammod.generate_password())
+    iammod.create_login_profile(iam, user=user, password=iammod.generate_password(),
+                                reset_required=False)
 
     iammod.delete_user(iam, user=user)
 

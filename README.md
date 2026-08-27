@@ -220,8 +220,8 @@ By the time the workflow ends, the account is already sealed and an instance
 inside it is building the rest. The console user is how you watch that happen —
 it is the only human access that survives.
 
-1. Sign in with the three fields from `console.json`. You will be asked to
-   change the password on first sign-in.
+1. Sign in with the three fields from `console.json`. The user can change its
+   own password.
 2. Go to **CloudFront → Distributions**.
 3. Wait until **both** distributions read **Deployed**.
 

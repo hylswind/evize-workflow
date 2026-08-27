@@ -71,7 +71,13 @@ def create_access_key(iam, *, user: str) -> tuple:
     return key["AccessKeyId"], key["SecretAccessKey"]
 
 
-def create_login_profile(iam, *, user: str, password: str, reset_required: bool = True) -> None:
+def create_login_profile(iam, *, user: str, password: str, reset_required: bool) -> None:
+    """Give a user a console password.
+
+    `reset_required` has no default: whether a human is made to change a
+    password before they can do anything is a decision for the caller that
+    hands it out, not a convention to inherit from here.
+    """
     iam.create_login_profile(UserName=user, Password=password, PasswordResetRequired=reset_required)
 
 

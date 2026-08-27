@@ -141,7 +141,8 @@ def test_a_user_is_stripped_of_everything_that_would_block_deletion(iam):
     iammod.create_access_key(iam, user="enclavize-starter")
     iammod.put_user_policy(iam, user="enclavize-starter", name="inline", document=a_policy())
     iammod.attach_user_policy(iam, user="enclavize-starter", policy_arn=policies.VIEW_ONLY_MANAGED_POLICY)
-    iammod.create_login_profile(iam, user="enclavize-starter", password=iammod.generate_password())
+    iammod.create_login_profile(iam, user="enclavize-starter",
+                                password=iammod.generate_password(), reset_required=False)
 
     iammod.delete_user(iam, user="enclavize-starter")
 

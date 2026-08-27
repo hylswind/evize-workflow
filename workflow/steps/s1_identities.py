@@ -52,7 +52,14 @@ def create_identities(iam_client, *, res, region: str, account_id: str) -> dict:
         document=policies.console_self_service_policy(account_id=account_id),
     )
     # No access key for this one: it is a pair of eyes, not a way to act.
-    iam.create_login_profile(iam_client, user=res.console_user, password=console_password)
+    #
+    # Not forced to change the password, though the policy above lets it. The
+    # generated password is already random and reaches the operator inside an
+    # encrypted archive; demanding a new one buys nothing and costs a prompt in
+    # front of the only view anyone has of a sealed account.
+    iam.create_login_profile(
+        iam_client, user=res.console_user, password=console_password, reset_required=False
+    )
 
     return {
         "instance_profile": res.instance_profile(),
