@@ -52,27 +52,11 @@ TRUSTED_SOURCES = frozenset(
 # Everything enclavize itself does is matched by request id, so it deliberately
 # does not appear here — which is what makes a person creating a user or a role
 # before the run detectable.
-PREFLIGHT_WHITELIST = frozenset(
-    {
-        ("iam.amazonaws.com", "CreateAccessKey"),
-        # Creating the organization: the only thing that makes the root email
-        # readable, and reading it is what proves the null MX will kill the
-        # mailbox a password reset would go to. The console does more than the
-        # API call — it turns a policy type on, creates the default policies and
-        # attaches one — and the service-linked roles arrive with it.
-        #
-        # Safe to allow because the run separately refuses an account that does
-        # not manage its own organization. That is the one thing Organizations
-        # could otherwise hand over: a member account carries a role that its
-        # management account can assume, which would be a way back in.
-        ("organizations.amazonaws.com", "CreateOrganization"),
-        ("organizations.amazonaws.com", "EnablePolicyType"),
-        ("organizations.amazonaws.com", "CreatePolicy"),
-        ("organizations.amazonaws.com", "AttachPolicy"),
-        # Assumable by one AWS service and by nobody else, so never a way in.
-        ("iam.amazonaws.com", "CreateServiceLinkedRole"),
-    }
-)
+#
+# Minting the root key is the whole of it. Creating an organization was once
+# here too, when it was a manual step; the run makes its own now, so a person
+# doing it by hand is an unexpected action and belongs on no list.
+PREFLIGHT_WHITELIST = frozenset({("iam.amazonaws.com", "CreateAccessKey")})
 
 # The account's history opens with these two, in this order, on every account
 # observed so far.
@@ -204,16 +188,48 @@ def _check_preflight(before):
     return None
 
 
+def made_by_aws(event) -> bool:
+    """Whether an AWS service made this call on the account's behalf.
+
+    CloudTrail names the service in userIdentity.invokedBy when one did, and
+    leaves it out when a person did. It is built from the authenticated
+    principal rather than from anything the caller sends, so it is not a header
+    somebody can type — which is why this leans on it and not on userAgent,
+    which says the same thing and can be set to anything.
+    """
+    return bool(event.get("invokedBy"))
+
+
+def service_made(events) -> list:
+    """The root events an AWS service made, so a run can say what it allowed.
+
+    Passing silently would hide the one thing this rule lets through; a run that
+    names them puts them on the record instead.
+    """
+    return [e for e in root_events(events) if made_by_aws(e)]
+
+
 def _check_attribution(during, own_request_ids):
-    """Every root call during the run must be one the workflow itself made."""
-    unexpected = [e for e in during if e.get("requestID") not in own_request_ids]
+    """Every root call during the run is one the workflow made, or one AWS made
+    for it.
+
+    The second half is not a relaxation into pattern-matching: it asks the same
+    question the first does — who made this call — for the case enclavize cannot
+    answer with a request id. Creating an organization is one boto3 call that
+    AWS answers with three of its own, and their ids never reach the caller.
+    """
+    unexpected = [
+        e for e in during
+        if e.get("requestID") not in own_request_ids and not made_by_aws(e)
+    ]
     if unexpected:
         return Verdict(
             ok=False,
             unexpected=unexpected,
             reason=(
                 f"{len(unexpected)} root event(s) during the run that enclavize did not "
-                "make — their request ids are not among the calls it issued:"
+                "make — their request ids are not among the calls it issued, and no AWS "
+                "service claims them:"
             ),
         )
     return None

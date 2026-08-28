@@ -25,7 +25,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 from enclavize.aws import domains as domainsmod  # noqa: E402
-from workflow.steps import s0_verify_email  # noqa: E402
+from enclavize.aws import organizations  # noqa: E402
 from harness import (  # noqa: E402
     ProfileError,
     allowed_accounts,
@@ -235,21 +235,31 @@ def check_the_root_key_secret_is_not_spent(report, profile, secrets):
     report.ok("ROOT_KEY_ID has not been spent by a later run")
 
 
-def check_root_email(report, session, profile, account):
-    """The run refuses if the root email is not at the domain. Say so here
-    instead, where it costs a command rather than a dispatch.
+def check_standalone(report, session, account):
+    """That the account is in no organization, which the run requires.
 
-    Reading the address at all needs an organization: nothing else in a
-    standalone account will answer, which is why creating one is a manual step.
+    It cannot go further than this. Reading the root email needs an
+    organization, and the only way to have one is to create it — which a
+    read-only command must not do. So the address itself is checked by the run
+    and by nothing before it.
     """
     try:
-        found = s0_verify_email.verify(
-            session.client("organizations"), account_id=account, domain=profile.domain
-        )
-    except SystemExit as exc:
-        report.bad(str(exc).replace("enclavize: ", ""))
+        management = organizations.management_account(session.client("organizations"))
+    except organizations.NotAnOrganization:
+        report.ok("account is standalone; the run will make an organization to read the "
+                  "root email, and remove it again")
+        report.warn("whether that email is at the domain is checked only by the run — "
+                    "nothing here can read it without creating one")
         return
-    report.ok(f"root email is at {found}, the domain this account will own")
+
+    if management["account_id"] == account:
+        report.bad("this account already manages an organization. The run makes its own "
+                   "and removes it, so this is one made by hand or the leftover of an "
+                   "attempt that died. Delete it first")
+    else:
+        report.bad(f"this account is a member of an organization managed by "
+                   f"{management['account_id']}, which can reach into it whatever "
+                   "enclavize does")
 
 
 def check_domain(report, session, profile):
@@ -316,7 +326,7 @@ def main(argv=None):
         session = boto3.Session(region_name=args.region)
         check_root_keys(report, session, profile, arn)
         check_account_is_clean(report, session, profile, account)
-        check_root_email(report, session, profile, account)
+        check_standalone(report, session, account)
         check_domain(report, session, profile)
     check_caller(report, profile, secrets)
     check_the_root_key_secret_is_not_spent(report, profile, secrets)

@@ -43,6 +43,11 @@ def _decode(raw: dict, region: str) -> dict:
         # read two ways rather than trusting one field: CloudTrail reports the
         # root user as type "Root", and its ARN ends in ":root".
         "isRoot": identity.get("type") == "Root" or arn.endswith(":root"),
+        # Set to the service principal when an AWS service made the call for
+        # you, absent when a person did. It is what lets the audit accept an
+        # event it could not have a request id for: AWS acting on the account's
+        # behalf leaves no id the caller ever sees.
+        "invokedBy": identity.get("invokedBy"),
         "readOnly": detail.get("readOnly"),
     }
 

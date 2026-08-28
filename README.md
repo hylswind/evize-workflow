@@ -99,22 +99,21 @@ That is why the domain comes first.
 3. Sign up a **new** AWS account using an address at that domain. This is the
    account that gets enclavized.
 4. In the new account's console, allow IAM users to access billing.
-5. In the same console, open **AWS Organizations** and create an organization.
-   The account becomes its own management account; add no member accounts.
-6. Create a root access key for it.
-7. Back on the spare account, start a domain transfer to the new account's id,
+5. Create a root access key for it.
+6. Back on the spare account, start a domain transfer to the new account's id,
    and keep the transfer password it gives you.
 
 The transfer is an AWS account-to-account handover, not a registrar transfer:
 there is no sixty-day lock, and the receiving side has three days to accept.
 
-**Step 5 is what makes step 3 checkable.** An account cannot read its own root
-email address: `account:GetPrimaryEmail` refuses a standalone account whether it
-asks as root or as an administrator, and CloudTrail redacts the address out of
-the sign-up event. `DescribeOrganization` takes no arguments, so there is no own
-account id for it to refuse — it simply names the management account and its
-email. With the organization in place, the run reads that address and stops if it
-is not at `domain`. Without it, the run stops too, and says to do this.
+**Step 3 is checked, not trusted.** The run reads the account's root email and
+stops if it is not at `domain` — before the transfer, before the console lock,
+before the key is deleted. Reading it takes an organization, because an account
+cannot otherwise learn its own root address: `account:GetPrimaryEmail` refuses a
+standalone account whether it asks as root or as an administrator, and CloudTrail
+redacts the address out of the sign-up event. So the run creates one, reads it,
+and removes it again. **The account must be in no organization when the run
+starts**, and is in none when it ends.
 
 ## 3. The five secrets
 
@@ -122,9 +121,9 @@ All five are required. Set them on the caller repository.
 
 | secret | what it is |
 |---|---|
-| `ROOT_KEY_ID` | the root access key from step 6. **The run deletes it** |
+| `ROOT_KEY_ID` | the root access key from step 5. **The run deletes it** |
 | `ROOT_SECRET` | its secret |
-| `TRANSFER_PASSWORD` | from step 7, to accept the domain transfer |
+| `TRANSFER_PASSWORD` | from step 6, to accept the domain transfer |
 | `APPLY_API_KEY` | a value **you choose**, which becomes the key for the apply endpoint |
 | `CONSOLE_ZIP_PASSWORD` | encrypts the console credentials before they become an artifact |
 
@@ -315,10 +314,11 @@ is refused with **400**, and a wrong key with **403**; neither starts anything.
 The order is the security property. Everything reversible happens first.
 
 1. Resolve the application repo's numeric id.
-2. **Check the root email is at this domain**, by reading the organization's
-   management account. The null MX kills a mailbox only if the mailbox is there;
-   an account signed up elsewhere would seal into something that merely looks
-   sealed.
+2. **Check the root email is at this domain.** The null MX kills a mailbox only
+   if the mailbox is there; an account signed up elsewhere would seal into
+   something that merely looks sealed. Reading the address takes an
+   organization, so this creates one, reads it out of the creating call's own
+   response, and removes it again.
 3. Create the identities that outlive root: an admin role only EC2 can assume,
    an event reader, a starter, and a console user that can see billing and the
    *shape* of the account — which resources exist — but not what is inside them.
@@ -337,10 +337,11 @@ The order is the security property. Everything reversible happens first.
 9. Audit. **Only what root did** — root is the one credential a person was ever
    handed, and any escalation from it leaves a root-produced trace at its root.
    The history is judged in two halves: before the run began, a short allow-list
-   covers exactly the manual preparation above — signing up, creating the
-   organization, minting the root key; from the run's first call onward, every
-   root event must carry a request id enclavize itself recorded, which catches
-   an extra call even when it looks exactly like one enclavize makes. The
+   covers exactly the manual preparation above — signing up, and minting the
+   root key; from the run's first call onward, every root event must carry a
+   request id enclavize itself recorded, or say that an AWS service made it,
+   which catches an extra call even when it looks exactly like one enclavize
+   makes. The
    history must open with the account's own first events,
    and root must do nothing after deleting its key.
 10. Fire the go flag. The account starts running itself.

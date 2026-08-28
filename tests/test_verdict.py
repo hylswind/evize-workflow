@@ -20,7 +20,7 @@ OWN = {"own-1", "own-2", "own-3"}
 
 
 def event(name, source="iam.amazonaws.com", offset=0, region="us-east-1",
-          is_root=True, request_id=None):
+          is_root=True, request_id=None, invoked_by=None):
     return {
         "eventName": name,
         "eventSource": source,
@@ -29,6 +29,8 @@ def event(name, source="iam.amazonaws.com", offset=0, region="us-east-1",
         "principal": "arn:aws:iam::123456789012:root" if is_root else "arn:aws:iam::1:user/enclavize",
         "isRoot": is_root,
         "requestID": request_id,
+        # CloudTrail names the service here when one made the call for you.
+        "invokedBy": invoked_by,
     }
 
 
@@ -49,20 +51,24 @@ def signup():
     ]
 
 
-def preparing_the_organization(at=500):
-    """What creating one from the console really produced, in this order.
+ORGANIZATIONS = "organizations.amazonaws.com"
 
-    Seven events for one action: the console turns a policy type on and attaches
-    the default policy, and two service-linked roles come along with it.
+
+def the_organization_the_run_makes(at, created_by, deleted_by):
+    """What creating and removing one really produced, taken from a real run.
+
+    Two calls of enclavize's and four answers of AWS's. The list was wrong twice
+    while this was written — `AccountJoinedOrganization` was missed first, then
+    `AccountDepartedOrganization` — which is the argument for judging these on
+    who made them rather than on a set of names somebody has to keep complete.
     """
     return [
-        event("CreateServiceLinkedRole", "iam.amazonaws.com", at),
-        event("CreateOrganization", "organizations.amazonaws.com", at),
-        event("CreateServiceLinkedRole", "iam.amazonaws.com", at),
-        event("EnablePolicyType", "organizations.amazonaws.com", at + 1),
-        event("CreatePolicy", "organizations.amazonaws.com", at + 2),
-        event("CreatePolicy", "organizations.amazonaws.com", at + 4),
-        event("AttachPolicy", "organizations.amazonaws.com", at + 5),
+        event("CreateOrganization", ORGANIZATIONS, at, request_id=created_by),
+        event("AccountJoinedOrganization", ORGANIZATIONS, at, invoked_by=ORGANIZATIONS),
+        event("CreateServiceLinkedRole", "iam.amazonaws.com", at, invoked_by=ORGANIZATIONS),
+        event("CreateServiceLinkedRole", "iam.amazonaws.com", at, invoked_by=ORGANIZATIONS),
+        event("DeleteOrganization", ORGANIZATIONS, at + 1, request_id=deleted_by),
+        event("AccountDepartedOrganization", ORGANIZATIONS, at + 1, invoked_by=ORGANIZATIONS),
     ]
 
 
@@ -138,13 +144,16 @@ def test_a_human_creating_a_user_before_the_workflow_is_caught():
     assert [e["eventName"] for e in result.unexpected] == ["CreateUser"]
 
 
-def test_preparing_the_organization_passes():
-    """A step the procedure now calls for, so its traces cannot fail the audit.
-    Without this the check would refuse every correctly prepared account."""
-    history = signup() + preparing_the_organization() + [
-        event("DeleteAccessKey", offset=7200, request_id="own-3")
+def test_creating_the_organization_by_hand_is_caught():
+    """It stopped being part of the procedure when the run started doing it, so
+    a person doing it is an unexpected action like any other."""
+    history = signup() + [
+        event("CreateOrganization", ORGANIZATIONS, 500),
+        event("DeleteAccessKey", offset=7200, request_id="own-3"),
     ]
-    assert judge(history).ok
+    result = judge(history)
+    assert not result.ok
+    assert [e["eventName"] for e in result.unexpected] == ["CreateOrganization"]
 
 
 def test_joining_somebody_elses_organization_is_still_caught():
@@ -204,6 +213,35 @@ def test_an_extra_call_during_the_run_is_caught():
     assert not result.ok
     assert "did not make" in result.reason
     assert [e["requestID"] for e in result.unexpected] == ["somebody-elses"]
+
+
+def test_the_organization_the_run_makes_for_itself_passes():
+    """Two calls of ours and four answers of AWS's. Only ours have ids we could
+    ever have recorded; the rest say who made them instead."""
+    assert judge(sealed(*the_organization_the_run_makes(3700, "own-1", "own-2"))).ok
+
+
+def test_what_aws_did_is_named_rather_than_waved_through():
+    """A run says what it allowed without an id, so it is on the record."""
+    allowed = verdict.service_made(
+        sealed(*the_organization_the_run_makes(3700, "own-1", "own-2")))
+    assert [e["eventName"] for e in allowed] == [
+        "AccountJoinedOrganization", "CreateServiceLinkedRole", "CreateServiceLinkedRole",
+        "AccountDepartedOrganization",
+    ]
+    assert {e["invokedBy"] for e in allowed} == {ORGANIZATIONS}
+
+
+def test_the_same_call_from_a_person_is_still_caught():
+    """The name is not what lets it through — `invokedBy` is. Without it, an
+    identical event fails, which is the whole difference."""
+    history = sealed(
+        event("CreateOrganization", ORGANIZATIONS, 3700, request_id="own-1"),
+        event("CreateServiceLinkedRole", "iam.amazonaws.com", 3700),   # no invokedBy
+    )
+    result = judge(history)
+    assert not result.ok
+    assert [e["eventName"] for e in result.unexpected] == ["CreateServiceLinkedRole"]
 
 
 def test_an_event_with_no_request_id_during_the_run_is_caught():

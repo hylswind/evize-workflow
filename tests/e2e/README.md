@@ -15,6 +15,8 @@ sealed for real:
   describes it
 - the state machine indexing its own applies — a listing, an intrinsic and a
   catch, none of which a definition being valid says anything about
+- the run creating an organization to read its own root email and removing it
+  again, which is the only way to find out what AWS really emits in answer
 
 **Not proven here: the event-history audit.** Every run in this suite passes
 `bypass_event_check=true`, because it keeps a way back into the account and the
@@ -78,11 +80,7 @@ not run. Naming the commit lets the suite hold out for the right results.
 1. A spare AWS account holding the domain.
 2. A freshly signed-up account to enclavize, using an address at that domain,
    with IAM billing access enabled.
-3. **An organization in that account**, created from its console, with itself as
-   the management account. It is the only thing that makes the root email
-   readable, and the run refuses without it. Created once and left alone —
-   `unseal.py` does not remove it, so it survives every cycle.
-4. **A way back in that outlives the seal.** Two shapes work:
+3. **A way back in that outlives the seal.** Two shapes work:
    - an **admin IAM user** created before the run, with no permissions
      boundary. Easier, because the workflow deletes the root key it is handed
      and a CLI configured with a separate user is unaffected by that churn.
@@ -91,11 +89,11 @@ not run. Naming the commit lets the suite hold out for the right results.
      in the profile and preflight can then tell them apart.
 
    Either way, without one the account is spent after a single run.
-5. **A root key for the workflow to spend**, set as `ROOT_KEY_ID`. If your way
+4. **A root key for the workflow to spend**, set as `ROOT_KEY_ID`. If your way
    back in is an IAM user, this can be the key your CLI used to use.
-6. `profiles/mine.yml`, copied from `example.yml`. Everything in `profiles/` is
+5. `profiles/mine.yml`, copied from `example.yml`. Everything in `profiles/` is
    gitignored except the example.
-7. The caller's five secrets set.
+6. The caller's five secrets set.
 
 ### What an IAM user cannot see
 

@@ -127,11 +127,12 @@ def run(cfg, *, res=None, log=print):
     account_id = sts.account_id(root.client("sts"))
     log(f"account {account_id}")
 
-    # Still before anything is touched. The null MX only kills a mailbox that is
-    # at this domain, so an account signed up elsewhere would seal into
-    # something that merely looks sealed.
+    # Nothing irreversible yet. The null MX only kills a mailbox that is at this
+    # domain, so an account signed up elsewhere would seal into something that
+    # merely looks sealed. Reading the address needs an organization, so this
+    # makes one and removes it again.
     s0_verify_email.verify(
-        root.client("organizations"), account_id=account_id, domain=cfg.domain
+        root.client("organizations"), account_id=account_id, domain=cfg.domain, log=log
     )
     log(f"root email is at {cfg.domain}, which this account is about to own")
 
@@ -219,6 +220,7 @@ def run(cfg, *, res=None, log=print):
             interval=config.DELIVERY_POLL_INTERVAL,
             own_request_ids=own_request_ids,
             workflow_started_at=workflow_started_at,
+            log=log,
         )
         if not verdict.ok:
             raise SystemExit(verdict.report())

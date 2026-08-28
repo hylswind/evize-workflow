@@ -10,7 +10,7 @@ from enclavize.logic import verdict as verdict_logic
 
 
 def verify(ct_client, ec2_client, client_for_region, *, start, end, home_region: str,
-           poll_max: int, interval: int, own_request_ids, workflow_started_at):
+           poll_max: int, interval: int, own_request_ids, workflow_started_at, log=print):
     """Return a Verdict over [start, end].
 
     The home region is polled until the account's creation has been delivered —
@@ -35,6 +35,11 @@ def verify(ct_client, ec2_client, client_for_region, *, start, end, home_region:
         start=start,
         end=end,
     )
+    # Named rather than waved through: these are the events the audit accepts
+    # without a request id, on AWS's word that it made them.
+    for event in verdict_logic.service_made(home_events):
+        log(f"allowed {event['eventName']}, made by {event['invokedBy']}")
+
     return verdict_logic.judge(
         home_events=home_events,
         other_region_events=other,
