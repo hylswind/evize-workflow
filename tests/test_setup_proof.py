@@ -1,12 +1,11 @@
-"""setup/proof.py — the check that the published bundle attests the published
-statement, and the sealing that follows it.
+"""setup/proof.py — waiting for the proof to land, and the sealing that follows.
 
 This runs at the very end of a bring-up, unwatched, and decides whether the
-starter user is retired. Getting it wrong either leaves a writer alive forever
-or deletes the only identity that could ever publish the proof.
+starter user is retired. What the account does not do is inspect the pair it
+published: the statement and its bundle are there for an outside verifier, and
+an account grading its own proof proves nothing.
 """
 
-import hashlib
 import json
 
 import boto3
@@ -29,42 +28,11 @@ def s3():
         yield client
 
 
-def publish(s3, *, statement=STATEMENT, bundle=None):
-    if bundle is None:
-        digest = hashlib.sha256(statement).hexdigest()
-        bundle = json.dumps({"subject": [{"digest": {"sha256": digest}}]}).encode()
+def publish(s3, *, statement=STATEMENT, bundle=b"{}"):
+    """Both objects landing is all this half cares about — their contents are
+    for whoever verifies them from outside."""
     s3mod.put_json(s3, bucket=BUCKET, key=config.STATEMENT_KEY, body=statement)
     s3mod.put_json(s3, bucket=BUCKET, key=config.BUNDLE_KEY, body=bundle)
-
-
-def test_a_bundle_that_attests_the_statement_is_accepted(s3):
-    publish(s3)
-    assert proof.statement_matches_bundle(s3, bucket=BUCKET) is True
-
-
-def test_a_bundle_for_a_different_statement_is_rejected(s3):
-    """The pair has to be self-consistent, or proof.{domain} would serve a
-    signature that covers something else."""
-    publish(s3, bundle=json.dumps({"subject": [{"digest": {"sha256": "0" * 64}}]}).encode())
-    assert proof.statement_matches_bundle(s3, bucket=BUCKET) is False
-
-
-def test_the_digest_is_of_the_exact_bytes_published(s3):
-    # Not of a re-serialised copy: the attestation covers the file as written.
-    statement = b'{\n  "accountID": "123456789012"\n}\n'
-    publish(s3, statement=statement)
-    assert proof.statement_matches_bundle(s3, bucket=BUCKET) is True
-
-    # The same JSON with different whitespace is a different subject.
-    s3mod.put_json(s3, bucket=BUCKET, key=config.STATEMENT_KEY,
-                   body=b'{"accountID":"123456789012"}')
-    assert proof.statement_matches_bundle(s3, bucket=BUCKET) is False
-
-
-def test_an_unreadable_bundle_does_not_crash_the_seal(s3):
-    # A bundle is JSON, but the check only looks for a digest in its text.
-    publish(s3, bundle=b"\xff\xfe not utf-8 at all")
-    assert proof.statement_matches_bundle(s3, bucket=BUCKET) is False
 
 
 class FakeIam:
@@ -98,27 +66,17 @@ def test_the_writer_is_retired_once_the_proof_has_landed(s3):
     assert iam.deleted == ["enclavize-starter"]
 
 
-def test_the_writer_survives_when_the_proof_never_arrives(s3, monkeypatch):
-    """Deleting it would make publishing impossible for good, so a run that
-    failed before signing must leave the door open."""
+def test_the_writer_is_retired_even_when_the_proof_never_arrives(s3, monkeypatch):
+    """Nobody is left who could publish it — the starter credentials only ever
+    existed in the runner, and a bundle needs a workflow's OIDC token — so
+    keeping the user would leave a live access key behind for nothing."""
     monkeypatch.setattr(config, "PROOF_OBJECT_POLL_MAX_SECONDS", 0)
     monkeypatch.setattr(config, "PROOF_OBJECT_POLL_INTERVAL", 0)
     iam = FakeIam()
-
-    published = proof.await_and_seal(s3, iam, bucket=BUCKET, res=Resources(), log=lambda *_: None)
-
-    assert published is False
-    assert iam.deleted == []
-
-
-def test_a_mismatched_bundle_is_reported_but_still_seals(s3, monkeypatch):
-    """The objects did arrive, so the writer has done its job; the mismatch is
-    worth saying out loud rather than leaving a credential alive over."""
-    publish(s3, bundle=json.dumps({"subject": [{"digest": {"sha256": "0" * 64}}]}).encode())
-    iam = FakeIam()
     said = []
 
-    assert proof.await_and_seal(s3, iam, bucket=BUCKET, res=Resources(), log=said.append)
+    published = proof.await_and_seal(s3, iam, bucket=BUCKET, res=Resources(), log=said.append)
 
-    assert any("does not attest" in line for line in said)
+    assert published is False
     assert iam.deleted == ["enclavize-starter"]
+    assert any("no proof arrived" in line for line in said)

@@ -8,8 +8,8 @@ the bucket's name from the account id, so no channel is needed.
 Three consequences shape the code below:
 - the bucket is created before anything slow, or the workflow waits on DNS
 - the bucket policy is allow-only, or it would deny an upload still in flight
-- the starter user is deleted only after the objects have landed, because
-  deleting it early would make the proof impossible to publish, ever
+- the wait for the objects outlasts the workflow's own wait for the bucket by a
+  wide margin, so reaching the end of it means there is no upload still coming
 """
 
 import json
@@ -74,11 +74,16 @@ def attach_cdn(cf_client, s3_client, r53_client, *, bucket: str, host: str, zone
 
 
 def await_and_seal(s3_client, iam_client, *, bucket: str, res, log=print) -> bool:
-    """Wait for the proof to arrive, check it, then retire the writer.
+    """Wait for the proof to arrive, then retire the writer either way.
 
-    Returns whether the proof landed. If it never does — which means the
-    workflow failed around signing — the starter user is deliberately left
-    alive, because deleting it would make publishing impossible for good.
+    Returns whether the proof landed, which is all the dashboard needs to say.
+
+    The writer goes even when it did not. Waiting an hour and finding nothing
+    means the workflow died, and a dead run does not come back: the starter
+    credentials only ever existed inside the runner, and a bundle can only be
+    signed by a workflow holding an OIDC token. Nobody is left who could publish,
+    so keeping the user leaves a live access key in an account whose whole claim
+    is that no human credential remains.
     """
     keys = [config.STATEMENT_KEY, config.BUNDLE_KEY]
     log(f"waiting for the workflow to publish {', '.join(keys)}")
@@ -90,27 +95,15 @@ def await_and_seal(s3_client, iam_client, *, bucket: str, res, log=print) -> boo
         interval=config.PROOF_OBJECT_POLL_INTERVAL,
     )
     if not landed:
-        log(
-            "WARNING: no proof arrived. Keeping the starter user so it can still "
-            "be published; the dashboard will report proof as missing."
-        )
-        return False
+        log("WARNING: no proof arrived; the dashboard will report proof as missing.")
 
-    if not statement_matches_bundle(s3_client, bucket=bucket):
-        log("WARNING: the published bundle does not attest the published statement")
-
+    # The pair is not inspected here. It is published for whoever wants to check
+    # it, and a statement its bundle does not attest means this account was not
+    # sealed — which is exactly what an outside verifier is for. An account
+    # grading its own proof proves nothing.
+    #
     # Nothing in the account can write here afterwards: the apply boundary
     # denies the bucket outright, and no principal can assume the admin role.
     iam.delete_user(iam_client, user=res.starter_user)
     log(f"deleted {res.starter_user}; the proof can no longer be rewritten from inside")
-    return True
-
-
-def statement_matches_bundle(s3_client, *, bucket: str) -> bool:
-    """Check the bundle really attests the statement sitting beside it."""
-    import hashlib
-
-    statement = s3.get_bytes(s3_client, bucket=bucket, key=config.STATEMENT_KEY)
-    digest = hashlib.sha256(statement).hexdigest()
-    bundle = s3.get_bytes(s3_client, bucket=bucket, key=config.BUNDLE_KEY).decode("utf-8", "replace")
-    return digest in bundle
+    return landed

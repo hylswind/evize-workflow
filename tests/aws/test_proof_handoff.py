@@ -97,27 +97,6 @@ def test_an_allow_only_bucket_policy_does_not_block_a_late_upload(s3, proof_buck
     ) is True
 
 
-def test_the_seal_step_recognises_a_matching_bundle(s3, proof_bucket, artifacts):
-    statement, bundle = artifacts
-    s3mod.create_bucket(s3, proof_bucket, region="us-east-1")
-    publish_proof.upload(
-        s3, bucket=proof_bucket, statement_path=statement, bundle_path=bundle,
-        poll_max=60, interval=5,
-    )
-
-    assert proof.statement_matches_bundle(s3, bucket=proof_bucket) is True
-
-
-def test_the_seal_step_notices_a_bundle_that_attests_something_else(s3, proof_bucket, artifacts):
-    statement, _ = artifacts
-    s3mod.create_bucket(s3, proof_bucket, region="us-east-1")
-    s3mod.put_file(s3, bucket=proof_bucket, key=workflow_config.STATEMENT_FILE, path=statement)
-    s3mod.put_json(s3, bucket=proof_bucket, key=workflow_config.BUNDLE_FILE,
-                   body=json.dumps({"subject": [{"digest": {"sha256": "0" * 64}}]}).encode())
-
-    assert proof.statement_matches_bundle(s3, bucket=proof_bucket) is False
-
-
 def test_a_bucket_that_never_appears_leaves_the_run_green(s3, prefix, artifacts):
     """The statement is signed and attached to the run either way; only the
     account's own copy is missing."""
