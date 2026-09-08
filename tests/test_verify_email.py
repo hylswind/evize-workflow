@@ -27,10 +27,10 @@ DELETE_ATTEMPTS = 3
 class FakeOrganizations:
     """One account's worth of Organizations, remembering what it was asked."""
 
-    def __init__(self, *, existing=None, email=f"owner@{DOMAIN}", delete_fails=False):
+    def __init__(self, *, existing=None, email=f"owner@{DOMAIN}", delete_failures=0):
         self.organization = existing   # {"account_id", "email"} or None
         self.email = email
-        self.delete_fails = delete_fails
+        self.delete_failures = delete_failures   # how many deletes refuse before one works
         self.calls = []
 
     def create_organization(self, FeatureSet):  # noqa: N803 - boto3's own name
@@ -51,7 +51,8 @@ class FakeOrganizations:
 
     def delete_organization(self):
         self.calls.append(("delete", None))
-        if self.delete_fails:
+        if self.delete_failures:
+            self.delete_failures -= 1
             raise error("ConcurrentModificationException", "DeleteOrganization")
         self.organization = None
 
@@ -126,14 +127,33 @@ def test_a_refused_domain_still_removes_the_organization():
     assert [name for name, _ in orgs.calls] == ["create", "delete"]
 
 
-def test_a_delete_that_will_not_work_warns_rather_than_stops():
-    """Stopping would leave the same organization behind *and* an unsealed
-    account."""
-    orgs = FakeOrganizations(delete_fails=True)
-    found, _, said = verify(orgs)
-    assert found == DOMAIN
-    assert any("could not remove the organization" in line for line in said)
+def test_a_delete_that_will_not_work_stops_the_run():
+    """The last moment stopping is free. Carrying on seals an account that
+    manages an organization nothing left inside it can delete — root's key is
+    gone by then — under a statement that says it is standalone.
+    """
+    orgs = FakeOrganizations(delete_failures=DELETE_ATTEMPTS)
+    with pytest.raises(SystemExit, match="could not remove it"):
+        verify(orgs)
     assert sum(1 for name, _ in orgs.calls if name == "delete") == DELETE_ATTEMPTS
+
+
+def test_a_delete_that_works_second_time_does_not_stop_the_run():
+    """A transient refusal must not read as one that will never work — which is
+    the whole reason the removal is still retried now that it can stop a run."""
+    orgs = FakeOrganizations(delete_failures=1)
+    found, _, _ = verify(orgs)
+    assert found == DOMAIN
+    assert orgs.organization is None
+
+
+def test_stopping_for_the_leftover_still_says_the_domain_was_wrong():
+    """Both are true and the operator needs both: the leftover is what to fix
+    now, the address is what would have failed anyway."""
+    orgs = FakeOrganizations(email="owner@elsewhere.test",
+                             delete_failures=DELETE_ATTEMPTS)
+    with pytest.raises(SystemExit, match="elsewhere.test"):
+        verify(orgs)
 
 
 # --- an account that is already in one ------------------------------------
