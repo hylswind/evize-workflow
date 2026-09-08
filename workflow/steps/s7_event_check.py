@@ -35,15 +35,16 @@ def verify(ct_client, ec2_client, client_for_region, *, start, end, home_region:
         start=start,
         end=end,
     )
-    # Named rather than waved through: these are the events the audit accepts
-    # without a request id, on AWS's word that it made them.
-    for event in verdict_logic.service_made(home_events):
-        log(f"allowed {event['eventName']}, made by {event['invokedBy']}")
-
-    return verdict_logic.judge(
+    verdict = verdict_logic.judge(
         home_events=home_events,
         other_region_events=other,
         own_request_ids=own_request_ids,
         workflow_started_at=workflow_started_at,
         home_region=home_region,
     )
+    # Named rather than waved through: these are the events the audit accepted
+    # without a request id, on AWS's word that it made them. Reported by the
+    # judgement itself, so the log cannot claim an allowance the rule never made.
+    for event in verdict.allowed:
+        log(f"allowed {event['eventName']}, made by {event['invokedBy']}")
+    return verdict

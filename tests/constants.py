@@ -7,6 +7,8 @@ These are deliberately not the production constants: threading values through
 proves the code uses what it was given rather than re-reading a module global.
 """
 
+from botocore.exceptions import ClientError
+
 ACCOUNT_ID = "123456789012"
 REGION = "us-east-1"
 DOMAIN = "example.com"
@@ -41,3 +43,8 @@ def clock(values):
 
 def no_sleep(*_args, **_kwargs):
     return None
+
+
+def error(code, operation):
+    """The botocore refusal a fake client raises, in the shape callers match on."""
+    return ClientError({"Error": {"Code": code, "Message": code}}, operation)

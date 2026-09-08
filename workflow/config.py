@@ -36,6 +36,9 @@ minutes. Running out is a warning, not a failure."""
 INSTANCE_PROFILE_WAIT_SECONDS = 90
 INSTANCE_PROFILE_RETRY_INTERVAL = 3
 
+ORGANIZATION_DELETE_ATTEMPTS = 3
+ORGANIZATION_DELETE_INTERVAL = 5
+
 BASE_AMI_PARAM = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
 INSTANCE_TYPE = "t3.large"
 

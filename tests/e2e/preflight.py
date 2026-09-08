@@ -37,6 +37,7 @@ from harness import (  # noqa: E402
     load_profile,
     unfit_to_unseal,
 )
+from workflow.steps import s0_verify_email  # noqa: E402
 
 OK, BAD, WARN = "  ok  ", " FAIL ", " warn "
 
@@ -252,14 +253,9 @@ def check_standalone(report, session, account):
                     "nothing here can read it without creating one")
         return
 
-    if management["account_id"] == account:
-        report.bad("this account already manages an organization. The run makes its own "
-                   "and removes it, so this is one made by hand or the leftover of an "
-                   "attempt that died. Delete it first")
-    else:
-        report.bad(f"this account is a member of an organization managed by "
-                   f"{management['account_id']}, which can reach into it whatever "
-                   "enclavize does")
+    # The run's own wording, not a second copy of it: the operator reads both,
+    # and two descriptions of one refusal drift.
+    report.bad(s0_verify_email.organization_refusal(management, account))
 
 
 def check_domain(report, session, profile):

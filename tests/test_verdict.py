@@ -161,7 +161,7 @@ def test_joining_somebody_elses_organization_is_still_caught():
     carries a role its management account can assume. Allowing the creation of
     an organization must not allow accepting an invitation into one."""
     history = signup() + [
-        event("AcceptHandshake", "organizations.amazonaws.com", 500),
+        event("AcceptHandshake", ORGANIZATIONS, 500),
         event("DeleteAccessKey", offset=7200, request_id="own-3"),
     ]
     result = judge(history)
@@ -222,14 +222,28 @@ def test_the_organization_the_run_makes_for_itself_passes():
 
 
 def test_what_aws_did_is_named_rather_than_waved_through():
-    """A run says what it allowed without an id, so it is on the record."""
-    allowed = verdict.service_made(
-        sealed(*the_organization_the_run_makes(3700, "own-1", "own-2")))
-    assert [e["eventName"] for e in allowed] == [
+    """A run says what it allowed without an id, so it is on the record.
+
+    Reported by the judgement itself, so it cannot name an event the rule never
+    let through — sign-up carries invokedBy too, and those pass on their source
+    being trusted, which is a different allowance.
+    """
+    result = judge(sealed(*the_organization_the_run_makes(3700, "own-1", "own-2")))
+    assert [e["eventName"] for e in result.allowed] == [
         "AccountJoinedOrganization", "CreateServiceLinkedRole", "CreateServiceLinkedRole",
         "AccountDepartedOrganization",
     ]
-    assert {e["invokedBy"] for e in allowed} == {ORGANIZATIONS}
+    assert {e["invokedBy"] for e in result.allowed} == {ORGANIZATIONS}
+
+
+def test_an_aws_made_event_before_the_run_is_not_claimed_as_allowed():
+    """It passed on TRUSTED_SOURCES, not on invokedBy."""
+    history = signup() + [
+        event("SetAccountPlan", "signup.amazonaws.com", 300, invoked_by="signup.amazonaws.com"),
+        event("CreateUser", offset=3700, request_id="own-1"),
+        event("DeleteAccessKey", offset=7200, request_id="own-3"),
+    ]
+    assert judge(history).allowed == []
 
 
 def test_the_same_call_from_a_person_is_still_caught():

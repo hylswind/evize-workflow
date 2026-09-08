@@ -48,6 +48,9 @@ TRUSTED_SOURCES = frozenset(
     }
 )
 
+ROOT_KEY_EVENT = "CreateAccessKey"
+SEAL_EVENT = "DeleteAccessKey"
+
 # What the operator does by hand before the workflow runs, and nothing else.
 # Everything enclavize itself does is matched by request id, so it deliberately
 # does not appear here — which is what makes a person creating a user or a role
@@ -56,7 +59,7 @@ TRUSTED_SOURCES = frozenset(
 # Minting the root key is the whole of it. Creating an organization was once
 # here too, when it was a manual step; the run makes its own now, so a person
 # doing it by hand is an unexpected action and belongs on no list.
-PREFLIGHT_WHITELIST = frozenset({("iam.amazonaws.com", "CreateAccessKey")})
+PREFLIGHT_WHITELIST = frozenset({("iam.amazonaws.com", ROOT_KEY_EVENT)})
 
 # The account's history opens with these two, in this order, on every account
 # observed so far.
@@ -65,15 +68,16 @@ OPENING_SEQUENCE = (
     ("signup.amazonaws.com", "CreateAccount"),
 )
 
-ROOT_KEY_EVENT = "CreateAccessKey"
-SEAL_EVENT = "DeleteAccessKey"
-
 
 @dataclass(frozen=True)
 class Verdict:
     ok: bool
     unexpected: list = field(default_factory=list)
     reason: str = ""
+    allowed: list = field(default_factory=list)
+    """The root events during the run that passed on AWS's word rather than on a
+    request id. The one thing the rule lets through without attribution, so a run
+    names them instead of passing them silently."""
 
     def report(self) -> str:
         """A failure report safe to print in a public CI log.
@@ -188,7 +192,7 @@ def _check_preflight(before):
     return None
 
 
-def made_by_aws(event) -> bool:
+def _made_by_aws(event) -> bool:
     """Whether an AWS service made this call on the account's behalf.
 
     CloudTrail names the service in userIdentity.invokedBy when one did, and
@@ -198,15 +202,6 @@ def made_by_aws(event) -> bool:
     which says the same thing and can be set to anything.
     """
     return bool(event.get("invokedBy"))
-
-
-def service_made(events) -> list:
-    """The root events an AWS service made, so a run can say what it allowed.
-
-    Passing silently would hide the one thing this rule lets through; a run that
-    names them puts them on the record instead.
-    """
-    return [e for e in root_events(events) if made_by_aws(e)]
 
 
 def _check_attribution(during, own_request_ids):
@@ -220,7 +215,7 @@ def _check_attribution(during, own_request_ids):
     """
     unexpected = [
         e for e in during
-        if e.get("requestID") not in own_request_ids and not made_by_aws(e)
+        if e.get("requestID") not in own_request_ids and not _made_by_aws(e)
     ]
     if unexpected:
         return Verdict(
@@ -260,6 +255,11 @@ def judge(
     before = [e for e in ordered if _at(e) and _at(e) < workflow_started_at]
     during = [e for e in ordered if _at(e) and _at(e) >= workflow_started_at]
 
+    # Only the run's own half. An AWS-made event before it passes on
+    # TRUSTED_SOURCES instead, which is a different allowance and not this one's
+    # to claim.
+    allowed = [e for e in during if _made_by_aws(e)]
+
     for check in (_check_preflight(before), _check_attribution(during, own_request_ids)):
         if check:
             return check
@@ -296,4 +296,4 @@ def judge(
             ),
         )
 
-    return Verdict(ok=True)
+    return Verdict(ok=True, allowed=allowed)

@@ -15,16 +15,13 @@ and removes it again — standalone going in, standalone coming out.
 
 import pytest
 from botocore.exceptions import ClientError
-from constants import ACCOUNT_ID, DOMAIN
+from constants import ACCOUNT_ID, DOMAIN, error, no_sleep
 
 from enclavize.aws import organizations
 from workflow.steps import s0_verify_email
 
 OTHER = "999988887777"
-
-
-def error(code, operation):
-    return ClientError({"Error": {"Code": code, "Message": code}}, operation)
+DELETE_ATTEMPTS = 3
 
 
 class FakeOrganizations:
@@ -64,7 +61,9 @@ def verify(orgs=None, **kwargs):
     said = []
     found = s0_verify_email.verify(
         orgs, account_id=ACCOUNT_ID, domain=kwargs.pop("domain", DOMAIN),
-        log=said.append, sleep=lambda _s: None, **kwargs,
+        delete_attempts=kwargs.pop("delete_attempts", DELETE_ATTEMPTS),
+        delete_interval=kwargs.pop("delete_interval", 5),
+        log=said.append, sleep=no_sleep, **kwargs,
     )
     return found, orgs, said
 
@@ -134,7 +133,7 @@ def test_a_delete_that_will_not_work_warns_rather_than_stops():
     found, _, said = verify(orgs)
     assert found == DOMAIN
     assert any("could not remove the organization" in line for line in said)
-    assert sum(1 for name, _ in orgs.calls if name == "delete") == s0_verify_email.DELETE_ATTEMPTS
+    assert sum(1 for name, _ in orgs.calls if name == "delete") == DELETE_ATTEMPTS
 
 
 # --- an account that is already in one ------------------------------------

@@ -132,7 +132,10 @@ def run(cfg, *, res=None, log=print):
     # merely looks sealed. Reading the address needs an organization, so this
     # makes one and removes it again.
     s0_verify_email.verify(
-        root.client("organizations"), account_id=account_id, domain=cfg.domain, log=log
+        root.client("organizations"), account_id=account_id, domain=cfg.domain,
+        delete_attempts=config.ORGANIZATION_DELETE_ATTEMPTS,
+        delete_interval=config.ORGANIZATION_DELETE_INTERVAL,
+        log=log,
     )
     log(f"root email is at {cfg.domain}, which this account is about to own")
 

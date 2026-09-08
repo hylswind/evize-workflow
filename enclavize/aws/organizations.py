@@ -52,24 +52,26 @@ def management_account(orgs) -> dict:
     }
 
 
-def create(orgs, *, feature_set: str = CONSOLIDATED_BILLING) -> dict:
-    """Make this account the management account of a new organization.
+def create(orgs) -> str:
+    """Make this account the management account of a new organization, and
+    return the email it signs in as.
 
-    The email comes out of this call's own response, so nothing has to be read
+    The address comes out of this call's own response, so nothing has to be read
     back and there is no consistency to wait on. Refuses an account that is
     already in one, which is how the caller learns its precondition failed
     without having to look first.
+
+    Only the address, where `management_account` also returns the id: the
+    account that manages an organization this call just made is by construction
+    the caller, so there is nothing there to learn.
     """
     try:
-        organization = orgs.create_organization(FeatureSet=feature_set)["Organization"]
+        organization = orgs.create_organization(FeatureSet=CONSOLIDATED_BILLING)["Organization"]
     except ClientError as exc:
         if exc.response.get("Error", {}).get("Code") == ALREADY_IN_ORGANIZATION:
             raise AlreadyInOne() from exc
         raise
-    return {
-        "account_id": organization["MasterAccountId"],
-        "email": organization["MasterAccountEmail"],
-    }
+    return organization["MasterAccountEmail"]
 
 
 def delete(orgs) -> None:
