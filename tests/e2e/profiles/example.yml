@@ -7,7 +7,8 @@
 # IAM user is the easier choice — the workflow deletes the root key it is given,
 # and a CLI configured with a separate user is unaffected by that churn.
 #
-# Secrets are never listed here. They come from the environment:
+# Secrets are never listed here. They come from the environment, and the place
+# to keep them is the .env beside this file — see example.env:
 #
 #   ENCLAVIZE_APPLY_API_KEY         the key the apply endpoint expects
 #   ENCLAVIZE_CONSOLE_ZIP_PASSWORD  optional; only to check the console archive

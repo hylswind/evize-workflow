@@ -95,8 +95,12 @@ not run. Naming the commit lets the suite hold out for the right results.
    Either way, without one the account is spent after a single run.
 4. **A root key for the workflow to spend**, set as `ROOT_KEY_ID`. If your way
    back in is an IAM user, this can be the key your CLI used to use.
-5. `profiles/mine.yml`, copied from `example.yml`. Everything in `profiles/` is
-   gitignored except the example.
+5. `profiles/mine.yml`, copied from `example.yml`, and `profiles/mine.env`,
+   copied from `example.env` and filled in with the apply key. Everything in
+   `profiles/` is gitignored except the two examples. The secrets live in a
+   file you type once rather than in the profile, a shell history or a chat:
+   the profile describes an account and gets passed around; the key opens
+   its apply endpoint and should not.
 6. The caller's five secrets set.
 
 ### What an IAM user cannot see
@@ -117,9 +121,8 @@ your way back in is not.
 export ENCLAVIZE_E2E=1
 export ENCLAVIZE_E2E_PROFILE=tests/e2e/profiles/mine.yml
 export ENCLAVIZE_TEST_ACCOUNTS=111122223333
-export ENCLAVIZE_APPLY_API_KEY=...
-export ENCLAVIZE_CONSOLE_ZIP_PASSWORD=...      # optional
-export AWS_PROFILE=...                          # root, or your admin IAM user
+set -a; . tests/e2e/profiles/mine.env; set +a       # the apply key, and the console password
+export AWS_PROFILE=...                              # root, or your admin IAM user
 
 python tests/e2e/preflight.py                   # read-only; fix what it reports
 pytest -m e2e tests/e2e/test_1_seal.py          # ~25–50 min

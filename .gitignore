@@ -8,7 +8,9 @@ console.7z
 .enclavize-publish.json
 bundle.jsonl
 
-# A caller, a domain and a key id together identify a real account.
+# A caller, a domain and a key id together identify a real account, and the
+# .env beside a profile holds its secrets.
 tests/e2e/profiles/*
 !tests/e2e/profiles/example.yml
+!tests/e2e/profiles/example.env
 tests/e2e/.e2e-state.json
