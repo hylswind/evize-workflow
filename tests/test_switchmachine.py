@@ -331,6 +331,13 @@ def test_every_way_out_clears_pending():
 
 
 def test_the_records_say_what_became_of_each_version():
+    # First thing, so a scheduled apply stops reading "waiting" the moment its
+    # switch begins — before anything is built, and not worth stopping for.
+    switching = states()["RecordSwitching"]["Parameters"]
+    assert states()["Begin"]["Next"] == "RecordSwitching"
+    assert switching["Key.$"] == "$.recordKey"
+    assert switching["Body"]["status"] == "switching"
+    assert states()["RecordSwitching"]["Catch"][0]["Next"] == "ReadCurrent"
     live = states()["UpdateRecord"]["Parameters"]
     assert live["Key.$"] == "$.recordKey"
     assert live["Body"]["status"] == "live"
@@ -340,7 +347,7 @@ def test_the_records_say_what_became_of_each_version():
     failed = states()["RecordFailed"]["Parameters"]
     assert failed["Key.$"] == "$.recordKey"
     assert failed["Body"]["status"] == "failed"
-    for record in (live, retired, failed):
+    for record in (switching, live, retired, failed):
         assert record["CacheControl"] == naming.CHANGES_CACHE_CONTROL
 
 
@@ -389,7 +396,7 @@ def test_giving_up_says_why():
 
 def test_the_time_of_the_switch_is_stamped_where_it_happens():
     stamped = [name for name, s in states().items() if "$$.State.EnteredTime" in json.dumps(s)]
-    assert stamped == ["DescribeCurrent", "RecordFailed"]
+    assert stamped == ["RecordSwitching", "DescribeCurrent", "RecordFailed"]
 
 
 def test_every_transition_resolves():

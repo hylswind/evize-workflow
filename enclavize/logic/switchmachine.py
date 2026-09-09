@@ -161,8 +161,23 @@ def build_definition(
                     ),
                     "counter": {"n": 0},
                 },
-                "Next": "ReadCurrent",
+                "Next": "RecordSwitching",
             },
+            # A scheduled apply sat in the record as "scheduled" until now; the
+            # dashboard should say the switch is under way the moment it is.
+            # Nothing has been built yet, so failing to say so is not worth
+            # stopping for.
+            "RecordSwitching": record(
+                "$.recordKey",
+                {
+                    "commit.$": "$.commit",
+                    "startedAt.$": "$.at",
+                    "switchAt.$": "$$.State.EnteredTime",
+                    "status": "switching",
+                },
+                "ReadCurrent",
+                _tidy("ReadCurrent"),
+            ),
             "ReadCurrent": {
                 "Type": "Task",
                 "Resource": "arn:aws:states:::aws-sdk:ssm:getParameter",

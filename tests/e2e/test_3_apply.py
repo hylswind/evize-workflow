@@ -234,6 +234,70 @@ def test_the_instance_carries_the_bounded_role(serving, rescue):
     assert [g["GroupName"] for g in instance["SecurityGroups"]] == [SETUP_RESOURCES.app_sg]
 
 
+# --- what one particular application does, while version one serves --------
+#
+# Optional. Absent from the profile, these skip and the contract above still
+# stands — which is what makes the suite usable against any application. Here
+# rather than at the end, because the version they ask about is retired by the
+# switch below and its answers go with it.
+
+
+def test_the_application_answers(profile, serving):
+    if not profile.app.url:
+        pytest.skip("profile sets no app.url; enclavize's own contract is checked above")
+    await_resolvable(urllib.parse.urlparse(profile.app.url).hostname,
+                     domain=profile.domain, timeout=profile.timeout("apply"))
+    poll(
+        lambda: fetch(profile.app.url)[0] == 200,
+        timeout=profile.timeout("apply"), interval=15,
+        what=f"{profile.app.url} to answer",
+    )
+
+
+def results_for(profile, commit):
+    """The application's own checks, from the version that ran `commit`.
+
+    Holds out for the right version where the application names one. The
+    front door only ever forwards to one version at a time, so the previous
+    one's answers cannot linger — but the poll still starts before the switch
+    has necessarily reached the version being asked about.
+    """
+    def reported():
+        code, body = fetch(profile.app.results_url)
+        if code != 200:
+            return None
+        found = json.loads(body)
+        # `commit` is optional in the contract. Where an application names the
+        # commit behind its results, this holds out for the right ones.
+        if found.get("commit") and found["commit"] != commit:
+            return None
+        return found
+
+    return poll(
+        reported, timeout=profile.timeout("apply"), interval=15,
+        what=f"{profile.app.results_url} to report on {commit[:12]}",
+    )
+
+
+def assert_checks_passed(results):
+    failed = [p for p in results.get("probes", []) if p.get("verdict") != "ok"]
+    assert not failed, "the application's own checks failed:\n" + "\n".join(
+        f"  {p.get('verdict')}  {p.get('name')} (expected {p.get('expected')}): {p.get('detail')}"
+        for p in failed
+    )
+    assert results.get("ok") is True
+
+
+def test_the_application_reports_its_own_checks_passing(profile, serving, applied):
+    """For an application that probes the permission boundary from inside the
+    sealed account, this is the only place IAM itself answers. Everywhere else
+    the boundary is asserted against a policy document — which says what should
+    happen, not what did."""
+    if not profile.app.results_url:
+        pytest.skip("profile sets no app.resultsUrl")
+    assert_checks_passed(results_for(profile, applied["commit"]))
+
+
 # --- the second apply: something serving, so it waits ----------------------
 
 
@@ -337,66 +401,7 @@ def test_the_new_version_answers_through_the_front_door(switched, profile):
     assert code == 200
 
 
-# --- what one particular application does ---------------------------------
-#
-# Optional. Absent from the profile, these skip and the contract above still
-# stands — which is what makes the suite usable against any application.
-
-
-def test_the_application_answers(profile, serving):
-    if not profile.app.url:
-        pytest.skip("profile sets no app.url; enclavize's own contract is checked above")
-    await_resolvable(urllib.parse.urlparse(profile.app.url).hostname,
-                     domain=profile.domain, timeout=profile.timeout("apply"))
-    poll(
-        lambda: fetch(profile.app.url)[0] == 200,
-        timeout=profile.timeout("apply"), interval=15,
-        what=f"{profile.app.url} to answer",
-    )
-
-
-def results_for(profile, commit):
-    """The application's own checks, from the version that ran `commit`.
-
-    Holds out for the right version where the application names one. The
-    front door only ever forwards to one version at a time, so the previous
-    one's answers cannot linger — but the poll still starts before the switch
-    has necessarily reached the version being asked about.
-    """
-    def reported():
-        code, body = fetch(profile.app.results_url)
-        if code != 200:
-            return None
-        found = json.loads(body)
-        # `commit` is optional in the contract. Where an application names the
-        # commit behind its results, this holds out for the right ones.
-        if found.get("commit") and found["commit"] != commit:
-            return None
-        return found
-
-    return poll(
-        reported, timeout=profile.timeout("apply"), interval=15,
-        what=f"{profile.app.results_url} to report on {commit[:12]}",
-    )
-
-
-def assert_checks_passed(results):
-    failed = [p for p in results.get("probes", []) if p.get("verdict") != "ok"]
-    assert not failed, "the application's own checks failed:\n" + "\n".join(
-        f"  {p.get('verdict')}  {p.get('name')} (expected {p.get('expected')}): {p.get('detail')}"
-        for p in failed
-    )
-    assert results.get("ok") is True
-
-
-def test_the_application_reports_its_own_checks_passing(profile, serving, applied):
-    """For an application that probes the permission boundary from inside the
-    sealed account, this is the only place IAM itself answers. Everywhere else
-    the boundary is asserted against a policy document — which says what should
-    happen, not what did."""
-    if not profile.app.results_url:
-        pytest.skip("profile sets no app.resultsUrl")
-    assert_checks_passed(results_for(profile, applied["commit"]))
+# --- and once version two has taken over -----------------------------------
 
 
 def test_the_version_switched_to_is_the_one_applied_second(profile, switched, scheduled):
