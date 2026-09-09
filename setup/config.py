@@ -13,6 +13,7 @@ from enclavize.logic.naming import (  # re-exported: the cross-phase contract
     APPLIES_PREFIX,
     CHANGES_CACHE_CONTROL,
     apply_host,
+    apply_param_name,
     dashboard_bucket_name,
     dashboard_host,
     proof_bucket_name,
@@ -58,6 +59,36 @@ COMMIT_PATTERN = "^[0-9a-f]{40}$"
 AMI_PARAM = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
 APPLY_INSTANCE_TYPE = "t3.large"
 
+# The front door: one load balancer at the apex, and what an application has to
+# answer behind it. The port and path are the contract an applied commit
+# follows, so they are documented in the README as well as named here.
+APP_PORT = 80
+HEALTH_PATH = "/healthz"
+HEALTH_INTERVAL_SECONDS = 10
+HEALTH_TIMEOUT_SECONDS = 5
+HEALTHY_THRESHOLD = 2
+UNHEALTHY_THRESHOLD = 2
+
+# How long after an apply is accepted the switch begins, when a version is
+# already serving. Baked into the receive state machine at bring-up, so a change
+# here takes effect on the next account sealed, not on one already running.
+SWITCH_DELAY_SECONDS = 300
+
+# The switch gives a new instance this long to become healthy before giving up
+# and leaving the current version where it was.
+SWITCH_HEALTHY_POLL_MAX_SECONDS = 3600
+SWITCH_HEALTHY_POLL_INTERVAL = 15
+# How long the retired instance gets to finish the requests it holds.
+DRAIN_SECONDS = 30
+
+LB_ACTIVE_POLL_MAX_SECONDS = 600
+LB_ACTIVE_POLL_INTERVAL = 15
+
+# What the front door answers until a version is switched in, and again if a
+# first switch is unwound.
+FRONT_DOOR_FALLBACK_STATUS = 503
+FRONT_DOOR_FALLBACK_BODY = "enclavize: no version applied yet\n"
+
 
 @dataclass(frozen=True)
 class Resources:
@@ -68,8 +99,16 @@ class Resources:
     apply_boundary: str = "enclavize-apply-boundary"
     apply_sfn_role: str = "enclavize-apply-sfn"
     apply_api_role: str = "enclavize-apply-api"
+    apply_scheduler_role: str = "enclavize-apply-scheduler"
     apply_state_machine: str = "enclavize-apply"
+    apply_switch_state_machine: str = "enclavize-apply-switch"
+    apply_switch_schedule: str = "enclavize-apply-switch"
     apply_api_name: str = "enclavize-apply-api"
+    app_lb: str = "enclavize-app"
+    app_lb_sg: str = "enclavize-alb"
+    app_sg: str = "enclavize-app"
+    apply_current_param: str = "/enclavize/apply/current"
+    apply_pending_param: str = "/enclavize/apply/pending"
 
     def with_prefix(self, prefix: str) -> "Resources":
         renamed = {}
@@ -80,16 +119,29 @@ class Resources:
             "apply_boundary",
             "apply_sfn_role",
             "apply_api_role",
+            "apply_scheduler_role",
             "apply_state_machine",
+            "apply_switch_state_machine",
+            "apply_switch_schedule",
             "apply_api_name",
+            "app_lb",
+            "app_lb_sg",
+            "app_sg",
         ):
             current = getattr(self, field_name)
             renamed[field_name] = prefix + current[len(self.prefix):] if current.startswith(self.prefix) else prefix + current
         renamed["prefix"] = prefix
+        renamed["apply_current_param"] = apply_param_name(prefix, "current")
+        renamed["apply_pending_param"] = apply_param_name(prefix, "pending")
         return replace(self, **renamed)
 
     def apply_boundary_arn(self, account_id: str) -> str:
         return f"arn:aws:iam::{account_id}:policy/{self.apply_boundary}"
+
+    def apply_param_prefix(self) -> str:
+        """The parameter path everything of the enclave's sits under, for the
+        boundary to name as read-only."""
+        return f"/{self.prefix.strip('-')}/"
 
 
 RESOURCES = Resources()

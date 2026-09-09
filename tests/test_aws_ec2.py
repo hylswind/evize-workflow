@@ -137,3 +137,49 @@ def test_resolve_ami_reads_the_public_parameter():
             return {"Parameter": {"Value": "ami-0123"}}
 
     assert ec2mod.resolve_ami(FakeSsm(), "/aws/service/ami-amazon-linux-latest/al2023-x86_64") == "ami-0123"
+
+
+# --- the front door's network --------------------------------------------
+
+
+def test_every_default_subnet_is_listed_in_zone_order(ec2):
+    """A load balancer has to span at least two zones, so it wants all of them."""
+    vpc_id = ec2mod.default_vpc(ec2)
+    subnets = ec2mod.default_subnets(ec2, vpc_id)
+    described = ec2.describe_subnets(SubnetIds=subnets)["Subnets"]
+    zones = [s["AvailabilityZone"] for s in sorted(described, key=lambda s: subnets.index(s["SubnetId"]))]
+    assert len(subnets) >= 2
+    assert zones == sorted(zones)
+    assert all(s["DefaultForAz"] for s in described)
+    assert ec2mod.default_subnet(ec2) == subnets[0]
+
+
+def test_a_security_group_wears_its_own_name(ec2):
+    # The tag is how the teardown finds it, and what the boundary matches on.
+    vpc_id = ec2mod.default_vpc(ec2)
+    group_id = ec2mod.create_security_group(ec2, name="enclavize-alb", description="d", vpc_id=vpc_id)
+    group = ec2.describe_security_groups(GroupIds=[group_id])["SecurityGroups"][0]
+    assert group["GroupName"] == "enclavize-alb"
+    assert {"Key": "Name", "Value": "enclavize-alb"} in group["Tags"]
+    assert ec2mod.security_groups_named(ec2, "enclavize-") == [(group_id, "enclavize-alb")]
+
+
+def test_the_instance_group_admits_the_balancers_group_and_nothing_else(ec2):
+    vpc_id = ec2mod.default_vpc(ec2)
+    lb = ec2mod.create_security_group(ec2, name="enclavize-alb", description="d", vpc_id=vpc_id)
+    app = ec2mod.create_security_group(ec2, name="enclavize-app", description="d", vpc_id=vpc_id)
+    ec2mod.authorize_ingress(ec2, group_id=lb, port=443)
+    ec2mod.authorize_ingress(ec2, group_id=app, port=80, source_group_id=lb)
+
+    rules = ec2.describe_security_groups(GroupIds=[app])["SecurityGroups"][0]["IpPermissions"]
+    assert len(rules) == 1
+    assert rules[0]["FromPort"] == rules[0]["ToPort"] == 80
+    assert rules[0]["UserIdGroupPairs"][0]["GroupId"] == lb
+    assert rules[0].get("IpRanges", []) == []
+
+    public = ec2.describe_security_groups(GroupIds=[lb])["SecurityGroups"][0]["IpPermissions"]
+    assert public[0]["IpRanges"] == [{"CidrIp": "0.0.0.0/0"}]
+
+    ec2mod.delete_security_group(ec2, app)
+    ec2mod.delete_security_group(ec2, lb)
+    assert ec2mod.security_groups_named(ec2, "enclavize-") == []

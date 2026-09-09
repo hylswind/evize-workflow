@@ -17,6 +17,9 @@ sealed for real:
   catch, none of which a definition being valid says anything about
 - the run creating an organization to read its own root email and removing it
   again, which is the only way to find out what AWS really emits in answer
+- the switch: a load balancer that checks a new instance before it gets
+  traffic, moves traffic in one change, and retires the old one — and the
+  one-time schedule that starts a later switch, waited out for real
 
 **Not proven here: the event-history audit.** Every run in this suite passes
 `bypass_event_check=true`, because it keeps a way back into the account and the
@@ -43,16 +46,17 @@ Checked by `preflight.py` before anything is dispatched:
 
 ### What an application must look like
 
-**One thing: an executable `setup.sh` at the repository root.** That is all
-enclavize requires, and the core of stage 3 checks no more than that — post a
-commit, an instance runs that script.
+**An executable `setup.sh` at the repository root that, when ready, listens
+on port 80 and answers `GET /healthz` with 200.** That is all enclavize
+requires, and the core of stage 3 checks no more than that — post a commit, an
+instance runs that script, the front door switches to it once it is healthy.
 
 Three optional additions let the suite check more, and each is skipped when the
 profile omits it:
 
 | profile key | what it adds |
 |---|---|
-| `app.url` | a URL polled until it answers after the commit is applied |
+| `app.url` | a URL polled until it answers after the commit is applied — normally `https://{domain}/`, the front door |
 | `app.resultsUrl` | a JSON document of the application's own checks |
 | `app.teardown` | a script `unseal.py` runs to remove what it created |
 
@@ -120,11 +124,15 @@ export AWS_PROFILE=...                          # root, or your admin IAM user
 python tests/e2e/preflight.py                   # read-only; fix what it reports
 pytest -m e2e tests/e2e/test_1_seal.py          # ~25–50 min
 pytest -m e2e tests/e2e/test_2_bringup.py       # ~40–75 min
-pytest -m e2e tests/e2e/test_3_apply.py         # ~5–15 min
+pytest -m e2e tests/e2e/test_3_apply.py         # ~15–25 min
 python tests/e2e/unseal.py                      # ~25 min, mostly CloudFront
 ```
 
-About two and a half hours end to end. The three stages run separately on
+About two and a half hours end to end. Stage 3 applies the same commit three
+times: the first switches at once, the second is scheduled and the first is
+told, the third is refused — then it waits out `SWITCH_DELAY_SECONDS` for the
+schedule to fire and the second version to replace the first. Nothing about the
+timer is simulated, which is why the delay is short while this is being proven. The three stages run separately on
 purpose: stages 2 and 3 assert against a live account rather than against stage
 1's memory, so either can be re-run alone while iterating.
 

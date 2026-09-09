@@ -199,12 +199,41 @@ ol {
 
 li {
   display: grid;
-  grid-template-columns: 15rem 1fr;
+  grid-template-columns: 15rem 1fr auto;
   align-items: baseline;
   gap: 0.15rem 1.25rem;
   padding: 0.72rem 0.5rem 0.72rem 0;
   border-bottom: 1px solid var(--rule);
   animation: rise 0.5s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+}
+
+/* What became of each apply, in the same small caps as the masthead. One
+   colour for serving, one for anything still to happen, one for what went
+   wrong; retired is simply dim. */
+.outcome {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+.outcome[data-outcome="live"] {
+  color: var(--seal);
+}
+
+.outcome[data-outcome="scheduled"],
+.outcome[data-outcome="switching"] {
+  color: var(--wake);
+}
+
+.outcome[data-outcome="failed"] {
+  color: var(--lost);
+}
+
+.outcome[data-outcome="retired"] {
+  color: var(--faint);
 }
 
 @keyframes rise {
@@ -322,12 +351,13 @@ footer {
   }
 
   li {
-    grid-template-columns: 1fr;
-    gap: 0.25rem;
+    grid-template-columns: 1fr auto;
+    gap: 0.25rem 1rem;
   }
 
   .at {
     order: 2;
+    grid-column: 1 / -1;
   }
 }
 

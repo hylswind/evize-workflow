@@ -11,14 +11,20 @@ validation records to be visible from outside.
 import time
 
 
-def request_certificate(acm, *, domain: str, alternative_names, idempotency_token: str) -> str:
-    """Request a DNS-validated certificate covering every host in one go."""
-    return acm.request_certificate(
-        DomainName=domain,
-        ValidationMethod="DNS",
-        SubjectAlternativeNames=list(alternative_names),
-        IdempotencyToken=idempotency_token,
-    )["CertificateArn"]
+def request_certificate(acm, *, domain: str, alternative_names=(), idempotency_token: str) -> str:
+    """Request a DNS-validated certificate for one name, or for several in one go.
+
+    The alternative names are left out of the request when there are none: ACM
+    refuses an empty list rather than reading it as "just the one".
+    """
+    request = {
+        "DomainName": domain,
+        "ValidationMethod": "DNS",
+        "IdempotencyToken": idempotency_token,
+    }
+    if alternative_names:
+        request["SubjectAlternativeNames"] = list(alternative_names)
+    return acm.request_certificate(**request)["CertificateArn"]
 
 
 def validation_records(acm, certificate_arn: str, *, poll_max: int = 120, interval: int = 5,

@@ -4,20 +4,32 @@
 // Those links open in a new tab and carry rel="noreferrer", which both keeps
 // this page where it was and denies the opened tab a handle back to it.
 //
-// Three files, all written by the account itself:
+// Four kinds of file, all written by the account itself:
 //
 //   status.json                  domain, bound repo, where the bring-up got to
 //   applies.json                 which months hold applies
 //   applies/index/{YYYY-MM}.json one month's applies, as S3 listed them
+//   applies/{at}_{commit}.json   one apply: what became of it
 //
 // The month shards are what keep the whole history reachable without ever
 // fetching all of it: the newest opens on load, and each "earlier" walks back
-// one more.
+// one more. The records are small and fetched one by one for the month on
+// show, because a listing says only that an apply happened — the record says
+// whether it is serving, waiting, or gone.
 
 const STATES = {
   starting: "setting up",
   "apply-ready": "apply ready",
   complete: "completed",
+};
+
+// What a record's status means to a person. Anything else is shown as it is.
+const OUTCOMES = {
+  scheduled: "waiting",
+  switching: "switching",
+  live: "serving",
+  retired: "retired",
+  failed: "failed",
 };
 
 const RECORDS = "applies/";
@@ -38,7 +50,7 @@ function read(path) {
 function parseRecord(key) {
   const bare = key.slice(RECORDS.length, -SUFFIX.length);
   const cut = bare.indexOf("_");
-  return cut < 0 ? null : { at: bare.slice(0, cut), commit: bare.slice(cut + 1) };
+  return cut < 0 ? null : { key, at: bare.slice(0, cut), commit: bare.slice(cut + 1) };
 }
 
 function parseMonth(key) {
@@ -62,6 +74,25 @@ function note(text, tone) {
   }
 }
 
+function commitLink(sha, className) {
+  // A link only when the repo is known — a commit with nowhere to point should
+  // not look like something to click.
+  //
+  // The tree at that commit, not the commit itself: an apply runs the whole
+  // repository as it stood, so the tree is what was applied. A diff only says
+  // what changed since whatever came before it, which may never have run here.
+  const commit = document.createElement(view.repo ? "a" : "span");
+  commit.className = className;
+  commit.textContent = sha.slice(0, 12);
+  if (view.repo) {
+    commit.href = `https://github.com/${view.repo}/tree/${sha}`;
+    commit.target = "_blank";
+    commit.rel = "noreferrer";
+    commit.title = sha;
+  }
+  return commit;
+}
+
 function row(record, position) {
   const li = document.createElement("li");
   // Capped: a month of two hundred applies should not take six seconds to
@@ -72,23 +103,12 @@ function row(record, position) {
   at.className = "at";
   at.textContent = stamp(record.at);
 
-  // A link only when the repo is known — a commit with nowhere to point should
-  // not look like something to click.
-  //
-  // The tree at that commit, not the commit itself: an apply runs the whole
-  // repository as it stood, so the tree is what was applied. A diff only says
-  // what changed since whatever came before it, which may never have run here.
-  const commit = document.createElement(view.repo ? "a" : "span");
-  commit.className = "commit";
-  commit.textContent = record.commit.slice(0, 12);
-  if (view.repo) {
-    commit.href = `https://github.com/${view.repo}/tree/${record.commit}`;
-    commit.target = "_blank";
-    commit.rel = "noreferrer";
-    commit.title = record.commit;
-  }
+  const outcome = document.createElement("span");
+  outcome.className = "outcome";
+  outcome.dataset.outcome = record.status || "unknown";
+  outcome.textContent = OUTCOMES[record.status] || record.status || "—";
 
-  li.append(at, commit);
+  li.append(at, commitLink(record.commit, "commit"), outcome);
   return li;
 }
 
@@ -116,6 +136,32 @@ function showStatus(status) {
   }
 }
 
+// What is serving and what is coming, read off the newest month's records: the
+// one marked live, and any still waiting or switching. The same records the
+// log shows, so the two cannot disagree.
+function showVersions(records) {
+  const serving = records.find((r) => r.status === "live");
+  const next = records.find((r) => r.status === "scheduled" || r.status === "switching");
+
+  const servingEl = el("serving");
+  servingEl.textContent = "";
+  if (serving) {
+    servingEl.append(commitLink(serving.commit, "commit"),
+      document.createTextNode(` since ${stamp(serving.switchedAt || serving.startedAt || serving.at)}`));
+  } else {
+    servingEl.textContent = "nothing yet";
+  }
+
+  const nextEl = el("next");
+  nextEl.textContent = "";
+  if (next) {
+    const when = next.status === "switching" ? "switching now" : `at ${stamp(next.switchAt || next.at)}`;
+    nextEl.append(commitLink(next.commit, "commit"), document.createTextNode(` ${when}`));
+  } else {
+    nextEl.textContent = "—";
+  }
+}
+
 function showEarlier() {
   const button = el("earlier");
   const next = view.months[view.opened];
@@ -124,6 +170,17 @@ function showEarlier() {
     button.textContent = `earlier · ${next.month}`;
     button.disabled = false;
   }
+}
+
+// Each record, so the row can say what became of the apply. A record that
+// cannot be read still gets its row: the listing proved the apply happened.
+function withOutcomes(records) {
+  return Promise.all(records.map((record) =>
+    read(`./${record.key}`).then(
+      (body) => Object.assign({}, record, body),
+      () => record
+    )
+  ));
 }
 
 function openNextMonth() {
@@ -135,24 +192,30 @@ function openNextMonth() {
 
   return read(`./${month.key}`).then(
     (shard) => {
-      view.opened += 1;
-      const records = (shard.applies || [])
+      const listed = (shard.applies || [])
         .map((entry) => parseRecord(entry.Key))
         .filter(Boolean)
         .sort((a, b) => (a.at < b.at ? 1 : -1));
+      return withOutcomes(listed).then((records) => {
+        const first = view.opened === 0;
+        view.opened += 1;
+        if (first) {
+          showVersions(records);
+        }
 
-      const list = el("applies");
-      records.forEach((record) => list.append(row(record, view.rows++)));
-      el("count").textContent = String(view.rows).padStart(3, "0");
+        const list = el("applies");
+        records.forEach((record) => list.append(row(record, view.rows++)));
+        el("count").textContent = String(view.rows).padStart(3, "0");
 
-      if (shard.truncated) {
-        note(`${month.month} holds more applies than one listing returns; the oldest of that month are not shown.`, "lost");
-      } else if (!view.rows) {
-        note("nothing applied yet.");
-      } else {
-        note("");
-      }
-      showEarlier();
+        if (shard.truncated) {
+          note(`${month.month} holds more applies than one listing returns; the oldest of that month are not shown.`, "lost");
+        } else if (!view.rows) {
+          note("nothing applied yet.");
+        } else {
+          note("");
+        }
+        showEarlier();
+      });
     },
     () => {
       note(`${month.month} could not be read.`, "lost");
@@ -169,6 +232,7 @@ function showLog(manifest) {
 
   if (!view.months.length) {
     el("count").textContent = "000";
+    showVersions([]);
     note("nothing applied yet.");
     return Promise.resolve();
   }
@@ -188,6 +252,7 @@ read("./status.json")
   .then(() =>
     read("./applies.json").then(showLog, () => {
       el("count").textContent = "000";
+      showVersions([]);
       note("nothing applied yet.");
     })
   );

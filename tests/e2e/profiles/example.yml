@@ -46,8 +46,14 @@ app:
   # executable setup.sh at its root.
   repo: acme/application
 
-  # Which commit to apply. Optional; the default branch's head otherwise.
-  ref: main
+  # Which commit to apply first. Optional; the default branch's head otherwise.
+  # `ref~N` walks back N commits, the way git spells it.
+  ref: main~1
+
+  # Which commit the second apply switches to. Optional; the same commit
+  # again otherwise, which still proves the switch but not that a different
+  # version arrived.
+  nextRef: main
 
   # --- everything below is optional ---------------------------------------
   #
@@ -55,8 +61,10 @@ app:
   # anything enclavize guarantees. Leave them out and those assertions are
   # skipped; the apply contract itself is still checked.
 
-  # A URL that should start answering once the commit has been applied.
-  url: https://app.example.com
+  # A URL that should start answering once the commit has been applied. An
+  # applied version answers at the apex, through the front door enclavize
+  # built, so this is normally the domain itself.
+  url: https://example.com
 
   # A JSON document reporting the application's own checks, in this shape:
   #
@@ -67,7 +75,7 @@ app:
   # For an application that probes the permission boundary from inside the
   # sealed account, this is the only place IAM itself answers rather than a
   # policy document being read — so set it if your application offers one.
-  resultsUrl: https://app.example.com/results.json
+  resultsUrl: https://example.com/results.json
 
   # A script in the application's repository that removes what it created.
   # unseal.py runs it, with the rescue credentials, before it dismantles
@@ -79,4 +87,4 @@ app:
 timeouts:
   seal: 3600      # dispatch to a finished workflow run
   bringup: 5400   # the account building itself: certificate, then two CDNs
-  apply: 900      # an applied commit becoming visible
+  apply: 1800     # an applied commit becoming healthy and being switched in

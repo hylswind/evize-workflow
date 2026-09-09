@@ -46,6 +46,50 @@ def service_trust(service: str) -> dict:
     }
 
 
+SCHEDULER_SERVICE = "scheduler.amazonaws.com"
+
+
+def scheduler_trust(*, account_id: str, region: str) -> dict:
+    """Assumable by EventBridge Scheduler, and only on this account's behalf.
+
+    Both conditions are the service's own guard against being used as a
+    confused deputy: without them a schedule in any account that named this
+    role's ARN could have it assumed. The source has to be the schedule group
+    rather than a schedule — Scheduler evaluates the condition against the
+    group, and a schedule-shaped ARN never matches.
+    """
+    return {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Principal": {"Service": SCHEDULER_SERVICE},
+                "Action": "sts:AssumeRole",
+                "Condition": {
+                    "StringEquals": {
+                        "aws:SourceAccount": account_id,
+                        "aws:SourceArn": f"arn:aws:scheduler:{region}:{account_id}:schedule-group/default",
+                    }
+                },
+            }
+        ],
+    }
+
+
+def apply_scheduler_role_policy(*, region: str, account_id: str, switch_state_machine: str) -> dict:
+    """Start the switch, and nothing else. What the schedule fires."""
+    return {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Action": "states:StartExecution",
+                "Resource": f"arn:aws:states:{region}:{account_id}:stateMachine:{switch_state_machine}",
+            }
+        ],
+    }
+
+
 def event_reader_policy() -> dict:
     """Read history, and list regions so the check can sweep all of them."""
     return {
@@ -122,9 +166,9 @@ def console_self_service_policy(*, account_id: str) -> dict:
     }
 
 
-def apply_machinery_denial(*, region: str, account_id: str, state_machine: str, domain: str,
-                           protected=None) -> dict:
-    """Keep applications off the enclave's own API, workflow and distributions.
+def apply_machinery_denial(*, region: str, account_id: str, state_machine: str,
+                           switch_state_machine: str, domain: str, protected=None) -> dict:
+    """Keep applications off the enclave's own API, workflows and distributions.
 
     Named resources where they are known, and the whole service where they are
     not. The distinction matters: denying `apigateway:*` outright also stops the
@@ -148,12 +192,16 @@ def apply_machinery_denial(*, region: str, account_id: str, state_machine: str, 
 
     apply_host = naming.apply_host(domain)
     resources = [
-        # Both names are fixed, so these are known from the start — unlike the
-        # API's generated id. Taking the custom domain would let an application
-        # answer at apply.{domain} in the enclave's place, collecting the API
-        # key out of the header of every request meant for the real one.
+        # All of these names are fixed, so they are known from the start —
+        # unlike the API's generated id. Taking the custom domain would let an
+        # application answer at apply.{domain} in the enclave's place,
+        # collecting the API key out of the header of every request meant for
+        # the real one; taking either workflow would let it switch versions on
+        # its own terms.
         f"arn:aws:states:{region}:{account_id}:stateMachine:{state_machine}",
         f"arn:aws:states:{region}:{account_id}:execution:{state_machine}:*",
+        f"arn:aws:states:{region}:{account_id}:stateMachine:{switch_state_machine}",
+        f"arn:aws:states:{region}:{account_id}:execution:{switch_state_machine}:*",
         f"arn:aws:apigateway:{region}::/domainnames/{apply_host}",
         f"arn:aws:apigateway:{region}::/domainnames/{apply_host}/*",
     ]
@@ -173,6 +221,36 @@ def apply_machinery_denial(*, region: str, account_id: str, state_machine: str, 
     }
 
 
+PARAMETER_READS = [
+    "ssm:GetParameter",
+    "ssm:GetParameters",
+    "ssm:GetParametersByPath",
+    "ssm:GetParameterHistory",
+    "ssm:DescribeParameters",
+]
+"""What an applied commit may do to the enclave's parameters: read them. The
+two under apply/ are how it learns what is serving and what is coming."""
+
+ENCLAVE_EC2_ACTIONS = [
+    "ec2:TerminateInstances",
+    "ec2:StopInstances",
+    "ec2:RebootInstances",
+    "ec2:AuthorizeSecurityGroupIngress",
+    "ec2:AuthorizeSecurityGroupEgress",
+    "ec2:RevokeSecurityGroupIngress",
+    "ec2:RevokeSecurityGroupEgress",
+    "ec2:ModifySecurityGroupRules",
+    "ec2:DeleteSecurityGroup",
+    "ec2:CreateTags",
+    "ec2:DeleteTags",
+]
+"""What the boundary denies on anything EC2 tagged with the enclave's name: the
+instances a switch is between, and the two groups that decide who may reach
+them. Terminating the other version — old or incoming — is the switch's job and
+nobody else's; and the tag itself stays put, because it is how the switch and
+the teardown find what to retire."""
+
+
 def apply_boundary_policy(
     *,
     account_id: str,
@@ -183,6 +261,8 @@ def apply_boundary_policy(
     domain: str,
     hosted_zone_id: str,
     state_machine: str,
+    switch_state_machine: str,
+    parameter_path: str,
     protected=None,
 ) -> dict:
     """The ceiling for everything an applied commit creates.
@@ -191,6 +271,9 @@ def apply_boundary_policy(
     but the enclave's own machinery is fenced off, and — critically — the
     boundary cannot be removed or swapped, so a principal the apply role creates
     can never exceed it.
+
+    `parameter_path` is the Parameter Store path everything of the enclave's
+    sits under (`/enclavize/`), which an application may read and not write.
     """
     iam_arn = f"arn:aws:iam::{account_id}"
     boundary_arn = f"{iam_arn}:policy/{resource_prefix}apply-boundary"
@@ -200,6 +283,7 @@ def apply_boundary_policy(
         f"{iam_arn}:policy/{resource_prefix}*",
         f"{iam_arn}:instance-profile/{resource_prefix}*",
     ]
+    elb_arn = f"arn:aws:elasticloadbalancing:{region}:{account_id}"
     return {
         "Version": "2012-10-17",
         "Statement": [
@@ -262,8 +346,7 @@ def apply_boundary_policy(
                 },
             },
             {
-                # The apex is the application's apart from three record types,
-                # each of which could make the signed statement untrue:
+                # The apex is the application's apart from five record types:
                 #
                 #   MX  — the null MX is what killed the mailbox; restoring it
                 #         reopens the account's password-reset path.
@@ -274,8 +357,13 @@ def apply_boundary_policy(
                 #         reaches this zone.
                 #   SOA — the zone's own parameters; grouped with NS as the
                 #         delegation's foundation.
+                #   A, AAAA — the apex is where the load balancer answers, and
+                #         the load balancer is what makes a switch happen only
+                #         once the new version is healthy. Pointed anywhere
+                #         else, the application would be serving around it.
                 #
-                # A, AAAA, TXT and the rest at the apex stay the application's.
+                # TXT, SRV, CNAME and the rest at the apex stay the
+                # application's.
                 #
                 # Deliberately absent: CAA, which would stop the certificate
                 # renewing, and with it the ACM validation records elsewhere in
@@ -292,7 +380,9 @@ def apply_boundary_policy(
                         "route53:ChangeResourceRecordSetsNormalizedRecordNames": [
                             domain.lower().rstrip("."),
                         ],
-                        "route53:ChangeResourceRecordSetsRecordTypes": ["MX", "NS", "SOA"],
+                        "route53:ChangeResourceRecordSetsRecordTypes": [
+                            "MX", "NS", "SOA", "A", "AAAA",
+                        ],
                     }
                 },
             },
@@ -300,9 +390,69 @@ def apply_boundary_policy(
                 region=region,
                 account_id=account_id,
                 state_machine=state_machine,
+                switch_state_machine=switch_state_machine,
                 domain=domain,
                 protected=protected,
             ),
+            {
+                # The front door and everything behind it: the balancer, its
+                # listeners, and every target group a switch makes. All named
+                # for the enclave, so all known from the start. An application
+                # may run balancers of its own; it may not touch this one.
+                "Sid": "CannotTouchTheFrontDoor",
+                "Effect": "Deny",
+                "Action": "elasticloadbalancing:*",
+                "Resource": [
+                    f"{elb_arn}:loadbalancer/app/{resource_prefix}*/*",
+                    f"{elb_arn}:listener/app/{resource_prefix}*/*/*",
+                    f"{elb_arn}:listener-rule/app/{resource_prefix}*/*/*/*",
+                    f"{elb_arn}:targetgroup/{resource_prefix}*/*",
+                ],
+            },
+            {
+                # The one-time schedule that starts a delayed switch. Deleting
+                # it would cancel a pending apply; rewriting it would move one.
+                "Sid": "CannotTouchTheSwitchTimer",
+                "Effect": "Deny",
+                "Action": "scheduler:*",
+                "Resource": f"arn:aws:scheduler:{region}:{account_id}:schedule/default/{resource_prefix}*",
+            },
+            {
+                # Read-only on the enclave's parameters. NotAction, so every
+                # write there is denied without listing each one: the two under
+                # apply/ are the account's word on what is serving and what is
+                # coming, and an application that could rewrite them could
+                # tell itself anything.
+                "Sid": "CanOnlyReadTheEnclavesParameters",
+                "Effect": "Deny",
+                "NotAction": PARAMETER_READS,
+                "Resource": f"arn:aws:ssm:{region}:{account_id}:parameter{parameter_path}*",
+            },
+            {
+                # Anything EC2 that carries the enclave's name: the instances a
+                # switch is between, and the groups that decide who reaches
+                # them. Matched by tag because these are made on the fly and
+                # have no fixed ARN.
+                "Sid": "CannotTouchTheEnclavesInstancesOrGroups",
+                "Effect": "Deny",
+                "Action": ENCLAVE_EC2_ACTIONS,
+                "Resource": "*",
+                "Condition": {
+                    "StringLike": {"aws:ResourceTag/Name": f"{resource_prefix}*"}
+                },
+            },
+            {
+                # The tag rule above is only as good as the tag, so the name
+                # itself is reserved: nothing an application creates may wear
+                # it, and nothing may be renamed into it.
+                "Sid": "CannotWearTheEnclavesName",
+                "Effect": "Deny",
+                "Action": "ec2:CreateTags",
+                "Resource": "*",
+                "Condition": {
+                    "StringLike": {"aws:RequestTag/Name": f"{resource_prefix}*"}
+                },
+            },
             {
                 # The rule that makes the fence hold at any depth. It lives in
                 # the boundary rather than in the apply role's own policy so
@@ -370,8 +520,18 @@ def apply_role_policy(*, boundary_arn: str) -> dict:
     }
 
 
-def apply_state_machine_policy(*, dashboard_bucket: str) -> dict:
-    """Launch one instance, and keep the dashboard's record of having done so.
+def apply_state_machine_policy(*, region: str, account_id: str, resource_prefix: str,
+                               dashboard_bucket: str, switch_state_machine: str, schedule: str,
+                               scheduler_role: str, instance_name_tag: str,
+                               parameter_path: str) -> dict:
+    """What the two apply workflows may do, shared between them.
+
+    Receiving: read the parameters, look for a switch in flight, start one or
+    schedule one. Switching: launch an instance, put it behind the balancer,
+    take the previous one out, and keep the parameters and the dashboard's
+    record straight. Every resource is named by the enclave's prefix, and the
+    one power that could reach an application's own instance — terminating —
+    is held to instances wearing the enclave's name.
 
     The listing is the part worth explaining. The dashboard is a static page and
     cannot list a bucket, so the index it reads has to be written by whatever
@@ -379,6 +539,8 @@ def apply_state_machine_policy(*, dashboard_bucket: str) -> dict:
     appended to, which is what makes it heal itself rather than drift. Held to
     the one prefix it reads, so this is no view of the rest of the bucket.
     """
+    elb_arn = f"arn:aws:elasticloadbalancing:{region}:{account_id}"
+    switch_arn = f"arn:aws:states:{region}:{account_id}:stateMachine:{switch_state_machine}"
     return {
         "Version": "2012-10-17",
         "Statement": [
@@ -386,6 +548,68 @@ def apply_state_machine_policy(*, dashboard_bucket: str) -> dict:
                 "Effect": "Allow",
                 "Action": ["ec2:RunInstances", "ec2:CreateTags", "ec2:DescribeInstances"],
                 "Resource": "*",
+            },
+            {
+                "Sid": "RetireOnlyTheEnclavesOwn",
+                "Effect": "Allow",
+                "Action": "ec2:TerminateInstances",
+                "Resource": "*",
+                "Condition": {"StringEquals": {"aws:ResourceTag/Name": instance_name_tag}},
+            },
+            {
+                # Describe calls take no resource, so they stand apart from the
+                # writes, which are held to the enclave's own groups and listener.
+                "Effect": "Allow",
+                "Action": [
+                    "elasticloadbalancing:DescribeTargetHealth",
+                    "elasticloadbalancing:DescribeTargetGroups",
+                    "elasticloadbalancing:DescribeListeners",
+                ],
+                "Resource": "*",
+            },
+            {
+                "Effect": "Allow",
+                "Action": [
+                    "elasticloadbalancing:CreateTargetGroup",
+                    "elasticloadbalancing:DeleteTargetGroup",
+                    "elasticloadbalancing:ModifyTargetGroupAttributes",
+                    "elasticloadbalancing:RegisterTargets",
+                    "elasticloadbalancing:DeregisterTargets",
+                    "elasticloadbalancing:ModifyListener",
+                    "elasticloadbalancing:AddTags",
+                ],
+                "Resource": [
+                    f"{elb_arn}:targetgroup/{resource_prefix}*/*",
+                    f"{elb_arn}:listener/app/{resource_prefix}*/*/*",
+                ],
+            },
+            {
+                "Effect": "Allow",
+                "Action": ["ssm:GetParameter", "ssm:PutParameter", "ssm:DeleteParameter"],
+                "Resource": f"arn:aws:ssm:{region}:{account_id}:parameter{parameter_path}apply/*",
+            },
+            {
+                # The receiving workflow's view of the switching one: is one
+                # running, and start one.
+                "Effect": "Allow",
+                "Action": ["states:StartExecution", "states:ListExecutions"],
+                "Resource": switch_arn,
+            },
+            {
+                "Effect": "Allow",
+                "Action": ["scheduler:CreateSchedule", "scheduler:GetSchedule"],
+                "Resource": f"arn:aws:scheduler:{region}:{account_id}:schedule/default/{schedule}",
+            },
+            {
+                # The schedule carries the role Scheduler will assume to start
+                # the switch, and creating one means passing it. Held to that
+                # service, so the same grant cannot hand the role to anything
+                # else.
+                "Sid": "PassTheTimerItsRole",
+                "Effect": "Allow",
+                "Action": "iam:PassRole",
+                "Resource": f"arn:aws:iam::{account_id}:role/{scheduler_role}",
+                "Condition": {"StringEquals": {"iam:PassedToService": SCHEDULER_SERVICE}},
             },
             {
                 "Effect": "Allow",

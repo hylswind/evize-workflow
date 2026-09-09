@@ -109,6 +109,16 @@ def stepfunctions(session):
 
 
 @pytest.fixture
+def elbv2(session):
+    return session.client("elbv2")
+
+
+@pytest.fixture
+def scheduler(session):
+    return session.client("scheduler")
+
+
+@pytest.fixture
 def signin(session):
     # Sign-in policy writes are only accepted in us-east-1.
     return session.client("signin", region_name="us-east-1")

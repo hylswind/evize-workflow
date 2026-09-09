@@ -1,137 +1,210 @@
-"""The apply state machine definition.
+"""The receiving state machine's definition: decide, record, answer.
 
-The escaping rules here come from the Amazon States Language spec: ' { } and \\
-are reserved inside an intrinsic invocation and each must be preceded by a
-backslash.
+It runs inside API Gateway's 29 seconds, so it never waits and never launches;
+the switch is another machine's job. What is pinned here is the decision — when
+an apply is refused, when it switches at once, when it is scheduled — and the
+record the dashboard reads.
 """
 
 import json
 
-from constants import APP_REPO, DOMAIN, REGION
+from constants import REGION
 
+from enclavize.aws import apigw
 from enclavize.logic import naming
 from enclavize.logic import statemachine as sm
-from setup import config as setup_config
 
 DASHBOARD_BUCKET = "enclavize-dashboard-123456789012"
+SWITCH_ARN = f"arn:aws:states:{REGION}:123456789012:stateMachine:enclavize-apply-switch"
+SCHEDULER_ROLE = "arn:aws:iam::123456789012:role/enclavize-apply-scheduler"
+SCHEDULE = "enclavize-apply-switch"
+CURRENT = "/enclavize/apply/current"
+PENDING = "/enclavize/apply/pending"
+DELAY = 300
 
 
-def definition():
+def definition(delay=DELAY):
     return sm.build_definition(
-        app_repo=APP_REPO,
-        domain=DOMAIN,
-        image_id="ami-1",
-        instance_type=setup_config.APPLY_INSTANCE_TYPE,
-        subnet_id="subnet-1",
-        instance_profile="enclavize-apply",
         dashboard_bucket=DASHBOARD_BUCKET,
-        name_tag="enclavize-apply",
+        switch_state_machine_arn=SWITCH_ARN,
+        schedule_name=SCHEDULE,
+        scheduler_role_arn=SCHEDULER_ROLE,
+        current_param=CURRENT,
+        pending_param=PENDING,
+        delay_seconds=delay,
+        in_flight_error=apigw.IN_FLIGHT_ERROR,
     )
 
 
-def user_data_expression():
-    return definition()["States"]["RenderUserData"]["Parameters"]["userData.$"]
+def states():
+    return definition()["States"]
 
 
-# --- escaping -------------------------------------------------------------
+def successors(state):
+    out = [state[k] for k in ("Next", "Default") if k in state]
+    out += [c["Next"] for c in state.get("Choices", [])]
+    out += [c["Next"] for c in state.get("Catch", [])]
+    return out
 
 
-def test_reserved_characters_are_escaped():
-    assert sm.escape_for_format("a'b") == "a\\'b"
-    assert sm.escape_for_format("a{b") == "a\\{b"
-    assert sm.escape_for_format("a}b") == "a\\}b"
-    assert sm.escape_for_format("a\\b") == "a\\\\b"
+# --- refusing --------------------------------------------------------------
 
 
-def test_placeholders_survive_escaping():
-    # Braces in the script get escaped; the substitution slots must not.
-    rendered = sm.escape_for_format(f"echo ${{HOME}} {sm.PLACEHOLDER}")
-    assert rendered == "echo $\\{HOME\\} {}"
+def test_an_apply_is_refused_while_one_is_in_flight():
+    """One at a time. A second apply while one waits or switches would race it
+    for the listener."""
+    busy = states()["Busy?"]
+    assert {c["Next"] for c in busy["Choices"]} == {"RefuseInFlight"}
+    refusal = states()["RefuseInFlight"]
+    assert refusal["Type"] == "Fail"
+    # The same string the API turns into a 409.
+    assert refusal["Error"] == apigw.IN_FLIGHT_ERROR
 
 
-def test_a_backslash_is_escaped_before_anything_else():
-    # Otherwise the backslash added for a quote would itself be doubled.
-    assert sm.escape_for_format("\\'") == "\\\\\\'"
+def test_in_flight_is_read_off_the_things_themselves():
+    """The schedule and the switch's running executions, not a marker: a
+    switch that died holds no slot, so a crash cannot jam the account for good."""
+    running = states()["AnySwitchRunning"]
+    assert running["Resource"] == "arn:aws:states:::aws-sdk:sfn:listExecutions"
+    assert running["Parameters"]["StateMachineArn"] == SWITCH_ARN
+    assert running["Parameters"]["StatusFilter"] == "RUNNING"
+
+    scheduled = states()["AnyScheduled"]
+    assert scheduled["Resource"] == "arn:aws:states:::aws-sdk:scheduler:getSchedule"
+    assert scheduled["Parameters"] == {"Name": SCHEDULE}
+    # No schedule is the ordinary case, not an error.
+    assert scheduled["Catch"][0]["ErrorEquals"] == ["Scheduler.ResourceNotFoundException"]
+    assert scheduled["Catch"][0]["Next"] == "Busy?"
+
+    variables = {c["Variable"] for c in states()["Busy?"]["Choices"]}
+    assert variables == {"$.running.Executions[0]", "$.scheduled.Arn"}
+    assert "getParameter" not in json.dumps(states()["Busy?"])
 
 
-# --- what the workflow does ----------------------------------------------
+# --- the first apply switches at once --------------------------------------
 
 
-def test_the_commit_is_substituted_where_the_script_needs_it():
-    expression = user_data_expression()
-    # Once, to check the repo out. The app is not handed the commit separately:
-    # it is already sitting at it.
-    assert expression.count("{}") == 1
-    assert expression.endswith("$.commit))")
+def test_nothing_serving_means_the_switch_starts_now():
+    first = states()["First?"]
+    assert first["Default"] == "SwitchNow"
+    assert first["Choices"][0]["Variable"] == "$.current.Parameter.Value"
+    assert first["Choices"][0]["Next"] == "WhenToSwitch"
+
+    current = states()["AnyCurrent"]
+    assert current["Parameters"] == {"Name": CURRENT}
+    assert current["Catch"][0]["ErrorEquals"] == ["Ssm.ParameterNotFoundException"]
 
 
-def test_the_user_data_is_base64_encoded_because_run_instances_expects_that():
-    assert user_data_expression().startswith("States.Base64Encode(States.Format(")
+def test_the_switch_is_started_and_not_waited_for():
+    start = states()["SwitchNow"]
+    assert start["Resource"] == "arn:aws:states:::states:startExecution"
+    assert ".sync" not in start["Resource"]
+    assert start["Parameters"]["StateMachineArn"] == SWITCH_ARN
+    assert start["Parameters"]["Input"] == {"commit.$": "$.commit", "at.$": "$.at", "immediate": True}
 
 
-def test_the_script_clones_the_app_repo_and_runs_its_entrypoint():
-    expression = user_data_expression()
-    assert f"git clone https://github.com/{APP_REPO}.git /opt/app" in expression
-    assert "exec ./setup.sh" in expression
+def test_an_immediate_switch_answers_switching():
+    outcome = states()["DescribeSwitching"]["Parameters"]
+    assert outcome["status"] == "switching"
+    assert outcome["switchAt.$"] == "$.at"
+    assert states()["DescribeSwitching"]["Next"] == "RecordApply"
 
 
-def test_the_script_fails_fast():
-    assert "#!/bin/bash\nset -euxo pipefail" in user_data_expression()
+# --- every later apply is scheduled ----------------------------------------
 
 
-def test_an_apply_instance_does_not_carry_the_api_key():
-    """It has no business holding the key that triggers applies: a commit that
-    could read it could apply another one."""
-    assert "APPLY_API_KEY" not in user_data_expression()
+def test_the_switch_time_is_the_receipt_plus_the_delay():
+    """The only JSONata in the definition: JSONPath's intrinsics cannot add to
+    a timestamp, and a one-time schedule needs `at(yyyy-mm-ddThh:mm:ss)`."""
+    when = states()["WhenToSwitch"]
+    assert when["Type"] == "Pass"
+    assert when["QueryLanguage"] == "JSONata"
+    expression = when["Output"]
+    assert expression.startswith("{%") and expression.endswith("%}")
+    assert f"$toMillis($states.input.at) + {DELAY * 1000}" in expression
+    assert "'at(' & $fromMillis($when, '[Y0001]-[M01]-[D01]T[H01]:[m01]:[s01]') & ')'" in expression
+    assert "'status': 'scheduled'" in expression
+
+    assert f"+ {3600 * 1000}" in definition(delay=3600)["States"]["WhenToSwitch"]["Output"]
 
 
-def test_the_script_stops_tracing_before_exporting_anything():
-    expression = user_data_expression()
-    assert expression.index("set +x") < expression.index("export ENCLAVIZE_DOMAIN")
+def test_jsonata_is_confined_to_that_one_state():
+    speaking = [name for name, s in states().items() if s.get("QueryLanguage") == "JSONata"]
+    assert speaking == ["WhenToSwitch"]
+    assert "QueryLanguage" not in definition()
 
 
-def test_the_domain_is_all_an_application_is_handed():
-    """The contract the README states, pinned here. A region would advertise
-    something enclavize cannot vary, and the commit is already what the repo was
-    checked out at — so neither belongs in an application's environment."""
-    exported = [line for line in user_data_expression().splitlines()
-                if line.startswith("export ")]
-    assert exported == [f"export ENCLAVIZE_DOMAIN={DOMAIN}"]
+def test_the_serving_version_is_told_before_the_timer_is_set():
+    """Written first, so the version serving learns what is coming even if
+    scheduling then fails — in which case the apply fails and the next one
+    overwrites this."""
+    assert states()["WhenToSwitch"]["Next"] == "WritePending"
+    pending = states()["WritePending"]
+    assert pending["Resource"] == "arn:aws:states:::aws-sdk:ssm:putParameter"
+    assert pending["Parameters"]["Name"] == PENDING
+    assert pending["Parameters"]["Value.$"] == "$.schedule.pendingValue"
+    assert pending["Parameters"]["Overwrite"] is True
+    assert pending["Next"] == "CreateSchedule"
+    # What the version reads: the commit and when.
+    assert "'pendingValue': $string({'commit': $states.input.commit, 'switchAt': $switchAt})" \
+        in states()["WhenToSwitch"]["Output"]
 
 
-def test_it_launches_with_the_bounded_apply_profile():
-    launch = definition()["States"]["LaunchInstance"]
-    assert launch["Resource"] == "arn:aws:states:::aws-sdk:ec2:runInstances"
-    assert launch["Parameters"]["IamInstanceProfile"] == {"Name": "enclavize-apply"}
-    assert launch["Parameters"]["UserData.$"] == "$.userData"
+def test_the_timer_fires_the_switch_once_and_then_goes():
+    schedule = states()["CreateSchedule"]
+    assert schedule["Resource"] == "arn:aws:states:::aws-sdk:scheduler:createSchedule"
+    parameters = schedule["Parameters"]
+    assert parameters["Name"] == SCHEDULE
+    assert parameters["ScheduleExpression.$"] == "$.schedule.expression"
+    assert parameters["ScheduleExpressionTimezone"] == "UTC"
+    assert parameters["FlexibleTimeWindow"] == {"Mode": "OFF"}
+    # Gone once fired: its absence is how the next apply tells pending from
+    # already started.
+    assert parameters["ActionAfterCompletion"] == "DELETE"
+    assert parameters["Target"]["Arn"] == SWITCH_ARN
+    assert parameters["Target"]["RoleArn"] == SCHEDULER_ROLE
+    assert parameters["Target"]["Input.$"] == "$.schedule.input"
+    assert "'immediate': false" in states()["WhenToSwitch"]["Output"]
 
 
-def test_launching_retries_while_the_instance_profile_propagates():
-    # The same delay that the sealing launch has to absorb.
-    retry = definition()["States"]["LaunchInstance"]["Retry"][0]
-    assert retry["MaxAttempts"] >= 10
-    assert retry["IntervalSeconds"] <= 5
+def test_a_decision_that_fails_fails_the_apply():
+    """Unlike the bookkeeping, these must not be caught and carried on from: an
+    apply that could not be scheduled has to say so."""
+    for name in ("AnySwitchRunning", "SwitchNow", "WritePending", "CreateSchedule"):
+        assert "Catch" not in states()[name], name
+    for name in ("AnyScheduled", "AnyCurrent"):
+        caught = [c["ErrorEquals"] for c in states()[name]["Catch"]]
+        assert ["States.ALL"] not in caught, name
 
 
-def test_every_apply_is_recorded_for_the_dashboard():
-    record = definition()["States"]["RecordApply"]
+# --- the record and the index ----------------------------------------------
+
+
+def test_every_apply_is_recorded_with_its_outcome():
+    record = states()["RecordApply"]
     assert record["Resource"] == "arn:aws:states:::aws-sdk:s3:putObject"
     assert record["Parameters"]["Bucket"] == DASHBOARD_BUCKET
-    assert record["Parameters"]["Body"]["instanceId.$"] == "$.launch.Instances[0].InstanceId"
+    body = record["Parameters"]["Body"]
+    assert body["status.$"] == "$.outcome.status"
+    assert body["switchAt.$"] == "$.outcome.switchAt"
+    assert body["startedAt.$"] == "$.at"
+    # Rewritten by the switch as it goes, so it must not be cached like the
+    # page beside it.
+    assert record["Parameters"]["CacheControl"] == naming.CHANGES_CACHE_CONTROL
 
 
 def test_applying_the_same_commit_twice_leaves_two_records():
     """The time leads the key, so a second apply cannot overwrite the first. It
     leads rather than trails because that is also what makes the keys sort in
     the order things happened."""
-    key = definition()["States"]["RecordApply"]["Parameters"]["Key.$"]
+    key = states()["RecordApply"]["Parameters"]["Key.$"]
     assert key == "States.Format('applies/{}_{}.json', $.at, $.commit)"
 
 
 def test_the_key_the_helper_builds_is_the_key_that_gets_written():
     """The state machine writes these keys; tests and tooling build them with
     the helper. Two definitions of one shape, so they are pinned to each other."""
-    expression = definition()["States"]["RecordApply"]["Parameters"]["Key.$"]
+    expression = states()["RecordApply"]["Parameters"]["Key.$"]
     template = expression.split("'")[1]
     assert template.format("AT", "SHA") == naming.apply_record_key("AT", "SHA")
 
@@ -139,34 +212,27 @@ def test_the_key_the_helper_builds_is_the_key_that_gets_written():
 def test_the_time_is_stamped_once_and_then_reused():
     """Read afresh in each state it drifts by milliseconds, and an apply landing
     on the last instant of a month would be filed under the next one."""
-    states = definition()["States"]
-    assert states["RenderUserData"]["Parameters"]["at.$"] == "$$.State.EnteredTime"
-    assert states["RecordApply"]["Parameters"]["Body"]["startedAt.$"] == "$.at"
-    after = {name: s for name, s in states.items() if name != "RenderUserData"}
+    assert states()["Stamp"]["Parameters"]["at.$"] == "$$.State.EnteredTime"
+    after = {name: s for name, s in states().items() if name != "Stamp"}
     assert "$$.State.EnteredTime" not in json.dumps(after)
-
-
-# --- the index the dashboard reads ---------------------------------------
 
 
 def test_the_index_is_rebuilt_from_listings_rather_than_appended_to():
     """A listing is idempotent, so a half-written index heals itself on the next
     apply instead of drifting. It is also the only thing the language can do:
     there is no intrinsic for appending to an array."""
-    states = definition()["States"]
-    assert states["ListMonth"]["Resource"].endswith("s3:listObjectsV2")
-    assert states["ListMonths"]["Resource"].endswith("s3:listObjectsV2")
-    assert "getObject" not in json.dumps(states)
+    assert states()["ListMonth"]["Resource"].endswith("s3:listObjectsV2")
+    assert states()["ListMonths"]["Resource"].endswith("s3:listObjectsV2")
+    assert "getObject" not in json.dumps(states())
 
 
 def test_one_month_is_one_listing():
     """Record keys open with the timestamp, so a month is a prefix — which is
     what spares this a continuation loop it has no counter for."""
-    states = definition()["States"]
-    assert states["ListMonth"]["Parameters"]["Prefix.$"] == (
+    assert states()["ListMonth"]["Parameters"]["Prefix.$"] == (
         "States.Format('applies/{}', $.month.name)"
     )
-    assert states["WhichMonth"]["Parameters"]["name.$"] == (
+    assert states()["WhichMonth"]["Parameters"]["name.$"] == (
         "States.Format('{}-{}', "
         "States.ArrayGetItem(States.StringSplit($.at, '-'), 0), "
         "States.ArrayGetItem(States.StringSplit($.at, '-'), 1))"
@@ -181,9 +247,8 @@ def test_a_months_listing_cannot_pick_up_a_shard():
 
 
 def test_the_manifest_names_the_months_and_nothing_else():
-    states = definition()["States"]
-    assert states["ListMonths"]["Parameters"]["Prefix"] == naming.APPLIES_INDEX_PREFIX
-    manifest = states["WriteManifest"]["Parameters"]
+    assert states()["ListMonths"]["Parameters"]["Prefix"] == naming.APPLIES_INDEX_PREFIX
+    manifest = states()["WriteManifest"]["Parameters"]
     assert manifest["Key"] == naming.APPLIES_MANIFEST_KEY
     assert manifest["Body"]["months.$"] == "$.months.Contents"
 
@@ -191,56 +256,76 @@ def test_the_manifest_names_the_months_and_nothing_else():
 def test_a_month_too_busy_to_list_says_so():
     """One listing caps at a thousand keys and this makes no second call, so the
     alternative to saying so is quietly showing part of a month."""
-    body = definition()["States"]["WriteMonthIndex"]["Parameters"]["Body"]
+    body = states()["WriteMonthIndex"]["Parameters"]["Body"]
     assert body["truncated.$"] == "$.page.IsTruncated"
 
 
 def test_what_the_dashboard_rereads_is_not_cached_like_the_rest():
-    states = definition()["States"]
     for name in ("WriteMonthIndex", "WriteManifest"):
-        assert states[name]["Parameters"]["CacheControl"] == naming.CHANGES_CACHE_CONTROL
+        assert states()[name]["Parameters"]["CacheControl"] == naming.CHANGES_CACHE_CONTROL
 
 
 def test_no_bookkeeping_failure_can_report_a_failed_apply():
-    """By the time any of this runs the instance is up and applying the commit.
+    """By the time any of this runs the switch has been started or scheduled.
     Letting a listing hiccup fail the execution would have the API answer that
     the apply failed, for work going ahead regardless."""
-    states = definition()["States"]
-    bookkeeping = ["RecordApply", "ListMonth", "WriteMonthIndex", "ListMonths",
-                   "WriteManifest"]
+    bookkeeping = ["RecordApply", "ListMonth", "WriteMonthIndex", "ListMonths", "WriteManifest"]
 
-    # Every task but the launch itself, so a new one cannot be added without a
-    # catch of its own.
-    assert [name for name, s in states.items()
-            if s["Type"] == "Task" and name != "LaunchInstance"] == bookkeeping
+    # Every task with a catch-all is bookkeeping, and every piece of
+    # bookkeeping has one — so a new task cannot be added without saying which.
+    catching = [name for name, s in states().items()
+                if s["Type"] == "Task"
+                and any(c["ErrorEquals"] == ["States.ALL"] for c in s.get("Catch", []))]
+    assert catching == bookkeeping
 
     for name in bookkeeping:
-        catch = states[name]["Catch"][0]
-        assert catch["ErrorEquals"] == ["States.ALL"]
+        catch = states()[name]["Catch"][0]
         assert catch["Next"] == "Done"
-        # Without this the error replaces the input, and Done answers with the
-        # instance the launch returned.
+        # Without this the error replaces the input, and Done answers with
+        # nothing.
         assert catch["ResultPath"] == "$.indexError"
 
 
-def test_it_returns_as_soon_as_the_instance_exists():
-    """It must not wait for the commit to finish: Express tops out at five minutes and the
-    API integration at 29 seconds."""
-    done = definition()["States"]["Done"]
+# --- the answer ------------------------------------------------------------
+
+
+def test_it_answers_with_what_will_happen_and_when():
+    """"switching" or "scheduled", never "applied": the switch has only just
+    started, or not yet. The dashboard is where it is watched."""
+    done = states()["Done"]
     assert done["End"] is True
-    # "launched", not "applied" — the instance has only just started.
-    assert done["Parameters"]["status"] == "launched"
-    assert done["Parameters"]["instanceId.$"] == "$.launch.Instances[0].InstanceId"
+    assert done["Parameters"] == {
+        "commit.$": "$.commit",
+        "status.$": "$.outcome.status",
+        "switchAt.$": "$.outcome.switchAt",
+    }
 
 
-def test_no_state_waits_on_the_apply_finishing():
-    states = definition()["States"]
-    assert not any(state["Type"] == "Wait" for state in states.values())
-    # A .sync task would block until the work completed.
-    assert not any(".sync" in str(state.get("Resource", "")) for state in states.values())
+def test_no_state_waits():
+    """Express tops out at five minutes and the API integration at 29 seconds."""
+    assert not any(state["Type"] == "Wait" for state in states().values())
+    assert not any(".sync" in str(state.get("Resource", "")) for state in states().values())
+
+
+def test_both_branches_reach_the_record_and_the_answer():
+    for start in ("SwitchNow", "WhenToSwitch"):
+        seen, stack = set(), [start]
+        while stack:
+            name = stack.pop()
+            if name in seen:
+                continue
+            seen.add(name)
+            stack.extend(successors(states()[name]))
+        assert {"RecordApply", "Done"} <= seen, start
+
+
+def test_every_transition_resolves():
+    for name, state in states().items():
+        for target in successors(state):
+            assert target in states(), (name, target)
 
 
 def test_the_definition_serialises():
     # It is sent as a JSON string, so anything unserialisable fails at create
     # time deep inside the bring-up.
-    assert json.loads(json.dumps(definition()))["StartAt"] == "RenderUserData"
+    assert json.loads(json.dumps(definition()))["StartAt"] == "Stamp"

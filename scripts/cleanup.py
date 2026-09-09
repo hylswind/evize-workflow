@@ -92,9 +92,10 @@ def unfit(arn: str) -> str:
 def confirm(account, domain, source):
     print(f"\naccount  {account}")
     print(f"domain   {domain}   (from {source})")
-    print("\nThis removes everything enclavize built: both distributions, the two")
-    print("buckets, the hosted zone and its records, the enclavize-* identities, the")
-    print("sign-in lock, the apply machinery, the anchor VPC and the certificate.")
+    print("\nThis removes everything enclavize built: the front door and every version")
+    print("behind it, both distributions, the two buckets, the hosted zone and its")
+    print("records, the enclavize-* identities, the sign-in lock, the apply machinery,")
+    print("the anchor VPC and the certificates.")
     print("\nAn application's own resources are NOT removed, and NOT reported either —")
     print("nothing here knows what one built. Removing them is yours to do.")
     if input("\nType the account id to confirm: ").strip() != account:

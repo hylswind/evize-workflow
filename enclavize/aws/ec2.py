@@ -21,24 +21,74 @@ def resolve_ami(ssm_client, param: str) -> str:
     return ssm_client.get_parameter(Name=param)["Parameter"]["Value"]
 
 
-def default_subnet(ec2) -> str:
-    """A subnet in the default VPC, chosen deterministically by AZ.
-
-    The account is brand new, so the default VPC is all there is; picking the
-    lowest AZ keeps repeat runs comparable.
-    """
+def default_vpc(ec2) -> str:
+    """The account is brand new, so the default VPC is all there is."""
     vpcs = ec2.describe_vpcs(Filters=[{"Name": "isDefault", "Values": ["true"]}])["Vpcs"]
     if not vpcs:
         raise RuntimeError("enclavize: this account has no default VPC to launch into")
+    return vpcs[0]["VpcId"]
+
+
+def default_subnets(ec2, vpc_id: str) -> list:
+    """Every default-for-AZ subnet in the VPC, ordered by AZ.
+
+    All of them rather than one: a load balancer has to span at least two
+    Availability Zones, and the ordering keeps repeat runs comparable.
+    """
     subnets = ec2.describe_subnets(
         Filters=[
-            {"Name": "vpc-id", "Values": [vpcs[0]["VpcId"]]},
+            {"Name": "vpc-id", "Values": [vpc_id]},
             {"Name": "default-for-az", "Values": ["true"]},
         ]
     )["Subnets"]
     if not subnets:
         raise RuntimeError("enclavize: the default VPC has no default subnet")
-    return sorted(subnets, key=lambda s: s["AvailabilityZone"])[0]["SubnetId"]
+    return [s["SubnetId"] for s in sorted(subnets, key=lambda s: s["AvailabilityZone"])]
+
+
+def default_subnet(ec2) -> str:
+    """A subnet in the default VPC, chosen deterministically: the lowest AZ."""
+    return default_subnets(ec2, default_vpc(ec2))[0]
+
+
+def create_security_group(ec2, *, name: str, description: str, vpc_id: str) -> str:
+    """A group tagged with its own name, which is how a teardown finds it."""
+    return ec2.create_security_group(
+        GroupName=name,
+        Description=description,
+        VpcId=vpc_id,
+        TagSpecifications=[
+            {"ResourceType": "security-group", "Tags": [{"Key": "Name", "Value": name}]}
+        ],
+    )["GroupId"]
+
+
+def authorize_ingress(ec2, *, group_id: str, port: int, cidr: str = None,
+                      source_group_id: str = None) -> None:
+    """One inbound TCP rule: from anywhere, or from one other group.
+
+    From a group rather than an address range is what lets the instance group
+    admit the load balancer and nothing else — the balancer's addresses are not
+    fixed, but its group is.
+    """
+    permission = {"IpProtocol": "tcp", "FromPort": port, "ToPort": port}
+    if source_group_id:
+        permission["UserIdGroupPairs"] = [{"GroupId": source_group_id}]
+    else:
+        permission["IpRanges"] = [{"CidrIp": cidr or "0.0.0.0/0"}]
+    ec2.authorize_security_group_ingress(GroupId=group_id, IpPermissions=[permission])
+
+
+def security_groups_named(ec2, prefix: str) -> list:
+    """Groups whose name carries the prefix, as (id, name) pairs."""
+    groups = ec2.describe_security_groups(
+        Filters=[{"Name": "group-name", "Values": [f"{prefix}*"]}]
+    )["SecurityGroups"]
+    return [(g["GroupId"], g["GroupName"]) for g in groups]
+
+
+def delete_security_group(ec2, group_id: str) -> None:
+    ec2.delete_security_group(GroupId=group_id)
 
 
 def launch(

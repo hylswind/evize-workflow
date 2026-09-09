@@ -26,8 +26,10 @@ from enclavize.aws import cdn as cdnmod  # noqa: E402
 from enclavize.aws import dns as dnsmod  # noqa: E402
 from enclavize.aws import domains as domainsmod  # noqa: E402
 from enclavize.aws import ec2 as ec2mod  # noqa: E402
+from enclavize.aws import elbv2 as elbmod  # noqa: E402
 from enclavize.aws import iam as iammod  # noqa: E402
 from enclavize.aws import s3 as s3mod  # noqa: E402
+from enclavize.aws import scheduler as schedmod  # noqa: E402
 from enclavize.aws import sfn as sfnmod  # noqa: E402
 from enclavize.aws import signin as signinmod  # noqa: E402
 from enclavize.aws import ssm as ssmmod  # noqa: E402
@@ -44,6 +46,13 @@ DISTRIBUTION_POLL_INTERVAL = 30
 # A distribution hands its certificate back well after it is itself gone.
 CERTIFICATE_RELEASE_ATTEMPTS = 20
 CERTIFICATE_RELEASE_INTERVAL = 30
+
+# A load balancer takes a while to go, and its security group cannot be deleted
+# until it has; the interfaces it held linger a little after that.
+LB_DELETE_POLL_MAX = 600
+LB_DELETE_POLL_INTERVAL = 15
+GROUP_RELEASE_ATTEMPTS = 12
+GROUP_RELEASE_INTERVAL = 10
 
 
 def step(message):
@@ -64,7 +73,9 @@ def attempt(what, action):
         # already gone, and reporting it as one would have the survey below call
         # the account clean.
         if code in ("NoSuchEntity", "NoSuchBucket", "NotFoundException", "NoSuchDistribution",
-                    "ResourceNotFoundException", "ParameterNotFound", "NoSuchHostedZone"):
+                    "ResourceNotFoundException", "ParameterNotFound", "NoSuchHostedZone",
+                    "LoadBalancerNotFound", "TargetGroupNotFound", "ListenerNotFound",
+                    "InvalidGroup.NotFound"):
             print(f"   (already gone) {what}")
         else:
             print(f"   COULD NOT delete {what}: {exc}")
@@ -111,6 +122,75 @@ def terminate_instances(session):
     # runs next expecting to delete the ones it attached.
     print("   waiting for them to go, so the groups they hold are released")
     _safe(lambda: ec2.get_waiter("instance_terminated").wait(InstanceIds=live), None)
+
+
+def delete_front_door(session):
+    """The balancer and everything that hangs off it, in the order the
+    dependencies run: listeners, then the balancer — waited out, because it
+    keeps its security group until it has actually gone — then every target
+    group a switch made or left behind, then the two groups, the instances'
+    first because the balancer's is the one it names.
+    """
+    elbv2 = session.client("elbv2")
+    ec2 = session.client("ec2")
+
+    balancers = _safe(lambda: elbmod.load_balancers_named(elbv2, SETUP_RESOURCES.prefix), [])
+    if not balancers:
+        print("   (no front door)")
+    for balancer in balancers:
+        for listener in _safe(lambda b=balancer: elbmod.listeners(elbv2, b["arn"]), []):
+            attempt(f"listener {listener.rsplit('/', 1)[-1]}",
+                    lambda a=listener: elbmod.delete_listener(elbv2, a))
+        if attempt(f"load balancer {balancer['name']}",
+                   lambda b=balancer: elbmod.delete_load_balancer(elbv2, b["arn"])):
+            print("   waiting for it to go, so the group it holds is released")
+            if not elbmod.await_deleted(elbv2, balancer["arn"], poll_max=LB_DELETE_POLL_MAX,
+                                        interval=LB_DELETE_POLL_INTERVAL):
+                print("   still going; re-run to finish the security groups")
+
+    for group in _safe(lambda: elbmod.target_groups_named(elbv2, SETUP_RESOURCES.prefix), []):
+        attempt(f"target group {group['name']}",
+                lambda g=group: elbmod.delete_target_group(elbv2, g["arn"]))
+
+    by_name = {name: group_id for group_id, name in
+               _safe(lambda: ec2mod.security_groups_named(ec2, SETUP_RESOURCES.prefix), [])}
+    for name in (SETUP_RESOURCES.app_sg, SETUP_RESOURCES.app_lb_sg):
+        if name in by_name:
+            _delete_group_when_released(ec2, name, by_name[name])
+
+
+def _delete_group_when_released(ec2, name, group_id):
+    """Retried, because a deleted balancer's interfaces let go of the group a
+    little after the balancer itself has gone."""
+    for remaining in range(GROUP_RELEASE_ATTEMPTS, 0, -1):
+        try:
+            ec2mod.delete_security_group(ec2, group_id)
+            print(f"   deleted security group {name}")
+            return
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code == "InvalidGroup.NotFound":
+                print(f"   (already gone) security group {name}")
+                return
+            if code != "DependencyViolation":
+                print(f"   COULD NOT delete security group {name}: {exc}")
+                return
+            if remaining == 1:
+                print(f"   security group {name} is still held; re-run to finish")
+                return
+            print(f"   security group {name} still held, waiting for it to be released")
+            time.sleep(GROUP_RELEASE_INTERVAL)
+
+
+def delete_schedules(session):
+    """A one-time schedule deletes itself once it has fired, so this usually
+    finds nothing — unless an apply was accepted and never switched."""
+    scheduler = session.client("scheduler")
+    names = _safe(lambda: schedmod.schedules_named(scheduler, SETUP_RESOURCES.prefix), [])
+    if not names:
+        print("   (no schedule pending)")
+    for name in names:
+        attempt(f"schedule {name}", lambda n=name: schedmod.delete_schedule(scheduler, n))
 
 
 def delete_apply_api(session, domain):
@@ -209,10 +289,16 @@ def delete_origin_access_controls(session):
 
 
 def delete_certificates(session, domain):
-    """After the distributions: ACM refuses to delete one still in use."""
+    """After the distributions and the front door: ACM refuses to delete a
+    certificate still in use, and both hold one.
+
+    Matched by the name each was issued for. The apex one is the front door's;
+    an application had no reason to request its own for a name the balancer
+    already answers at.
+    """
     acm = session.client("acm")
     wanted = {naming.dashboard_host(domain), naming.proof_host(domain),
-              naming.apply_host(domain)}
+              naming.apply_host(domain), domain}
     for page in acm.get_paginator("list_certificates").paginate():
         for certificate in page["CertificateSummaryList"]:
             if certificate["DomainName"] in wanted:
@@ -338,11 +424,19 @@ def everything(session, account: str, domain: str, *, after_instances=None):
     if after_instances is not None:
         after_instances()
 
+    # After the instances: the balancer's group cannot go while an instance
+    # still holds the one that names it.
+    step("the front door")
+    delete_front_door(session)
+
     step("the apply API")
     delete_apply_api(session, domain)
 
-    step("the state machine")
+    step("the state machines")
     delete_state_machines(session)
+
+    step("the switch timer")
+    delete_schedules(session)
 
     step("the distributions")
     delete_distributions(session, domain)
@@ -371,9 +465,11 @@ def everything(session, account: str, domain: str, *, after_instances=None):
     step("the certificate")
     delete_certificates(session, domain)
 
-    step("the go flag")
-    attempt(RESOURCES.go_param,
-            lambda: ssmmod.delete_parameter(session.client("ssm"), RESOURCES.go_param))
+    step("the parameters")
+    ssm = session.client("ssm")
+    for name in (RESOURCES.go_param, SETUP_RESOURCES.apply_current_param,
+                 SETUP_RESOURCES.apply_pending_param):
+        attempt(name, lambda n=name: ssmmod.delete_parameter(ssm, n))
 
 
 def report(session, account: str, domain: str) -> list:
@@ -443,7 +539,7 @@ def still_standing(session, account: str, domain: str) -> list:
     acm = session.client("acm")
     for page in _safe(lambda: list(acm.get_paginator("list_certificates").paginate()), []):
         found += [f"certificate {c['DomainName']}" for c in page["CertificateSummaryList"]
-                  if c["DomainName"] in enclave_hosts]
+                  if c["DomainName"] in enclave_hosts | {domain}]
 
     cf = session.client("cloudfront")
     for page in _safe(lambda: list(cf.get_paginator("list_distributions").paginate()), []):
@@ -479,6 +575,14 @@ def still_standing(session, account: str, domain: str) -> list:
     found += [f"state machine {m['name']}" for m in _safe(
         lambda: session.client("stepfunctions").list_state_machines()["stateMachines"], [])
         if m["name"].startswith(SETUP_RESOURCES.prefix)]
+    found += [f"schedule {n}" for n in _safe(
+        lambda: schedmod.schedules_named(session.client("scheduler"), SETUP_RESOURCES.prefix), [])]
+
+    elbv2 = session.client("elbv2")
+    found += [f"load balancer {b['name']}"
+              for b in _safe(lambda: elbmod.load_balancers_named(elbv2, SETUP_RESOURCES.prefix), [])]
+    found += [f"target group {g['name']}"
+              for g in _safe(lambda: elbmod.target_groups_named(elbv2, SETUP_RESOURCES.prefix), [])]
 
     ec2 = session.client("ec2")
     for reservation in _safe(lambda: ec2.describe_instances(Filters=[
@@ -488,9 +592,13 @@ def still_standing(session, account: str, domain: str) -> list:
         found += [f"instance {i['InstanceId']}" for i in reservation["Instances"]]
     found += [f"anchor vpc {v['VpcId']}" for v in _safe(lambda: ec2.describe_vpcs(Filters=[
         {"Name": "tag:Name", "Values": [RESOURCES.signin_lock_vpc_tag]}])["Vpcs"], [])]
+    found += [f"security group {name}" for _, name in _safe(
+        lambda: ec2mod.security_groups_named(ec2, SETUP_RESOURCES.prefix), [])]
 
-    if _safe(lambda: session.client("ssm").get_parameter(
-            Name=RESOURCES.go_param), None):
-        found.append(f"go flag {RESOURCES.go_param}")
+    ssm = session.client("ssm")
+    for name in (RESOURCES.go_param, SETUP_RESOURCES.apply_current_param,
+                 SETUP_RESOURCES.apply_pending_param):
+        if _safe(lambda n=name: ssm.get_parameter(Name=n), None):
+            found.append(f"parameter {name}")
 
     return found

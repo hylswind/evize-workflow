@@ -1,21 +1,28 @@
-"""The state machine behind the apply API.
+"""The two state machines behind the apply API.
 
-It is Express and invoked synchronously, which is only viable because it does
-one quick thing: launch an instance. It never waits for the commit to finish —
-that would blow through both the five-minute Express ceiling and API Gateway's
-29-second integration timeout. Progress is watched on the dashboard instead.
+The receiving one is Express and invoked synchronously, which is only viable
+because it does one quick thing: decide, and start or schedule the switch. It
+never waits for anything — that would blow through both the five-minute
+Express ceiling and API Gateway's 29-second integration timeout.
+
+The switching one is Standard, because it does wait: for an instance to come
+up, pass its health checks, and drain the one it replaces.
 """
 
 import json
 
+EXPRESS = "EXPRESS"
+STANDARD = "STANDARD"
 
-def create_state_machine(sfn, *, name: str, definition: dict, role_arn: str) -> str:
-    """Create an Express state machine. Returns its ARN."""
+
+def create_state_machine(sfn, *, name: str, definition: dict, role_arn: str,
+                         kind: str = EXPRESS) -> str:
+    """Create a state machine of the given kind. Returns its ARN."""
     return sfn.create_state_machine(
         name=name,
         definition=json.dumps(definition),
         roleArn=role_arn,
-        type="EXPRESS",
+        type=kind,
     )["stateMachineArn"]
 
 

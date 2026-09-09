@@ -75,11 +75,13 @@ def test_the_real_boundary_document_can_be_rotated(iam):
         account_id=ACCOUNT_ID, region=REGION, resource_prefix="enclavize-",
         proof_bucket="p", dashboard_bucket="d", domain="example.com",
         hosted_zone_id="Z1", state_machine="enclavize-apply",
+        switch_state_machine="enclavize-apply-switch", parameter_path="/enclavize/",
     )
     narrow = policies.apply_boundary_policy(
         account_id=ACCOUNT_ID, region=REGION, resource_prefix="enclavize-",
         proof_bucket="p", dashboard_bucket="d", domain="example.com",
         hosted_zone_id="Z1", state_machine="enclavize-apply",
+        switch_state_machine="enclavize-apply-switch", parameter_path="/enclavize/",
         protected={"api_id": "abc", "distribution_ids": ["E1"]},
     )
     arn = iammod.create_policy(iam, name="enclavize-apply-boundary", document=wide)

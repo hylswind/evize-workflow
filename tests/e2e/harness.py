@@ -61,7 +61,7 @@ REQUIRED_PERMISSIONS = {
     "contents": "read",
 }
 
-DEFAULT_TIMEOUTS = {"seal": 3600, "bringup": 5400, "apply": 900}
+DEFAULT_TIMEOUTS = {"seal": 3600, "bringup": 5400, "apply": 1800}
 
 STATE_FILE = pathlib.Path(__file__).parent / ".e2e-state.json"
 """What stage 1 leaves for the later stages: which run to read the statement
@@ -87,6 +87,7 @@ class App:
 
     repo: str
     ref: str = ""
+    next_ref: str = ""
     url: str = ""
     results_url: str = ""
     teardown: str = ""
@@ -151,6 +152,7 @@ def parse_profile(text: str) -> Profile:
         app=App(
             repo=app_raw["repo"],
             ref=app_raw.get("ref") or "",
+            next_ref=app_raw.get("nextRef") or "",
             url=app_raw.get("url") or "",
             results_url=app_raw.get("resultsUrl") or "",
             teardown=app_raw.get("teardown") or "",
@@ -268,9 +270,18 @@ def repo_id(repo: str) -> int:
     return int(gh("api", f"repos/{repo}", "--jq", ".id", check=True).stdout.strip())
 
 def head_sha(repo: str, ref: str = "") -> str:
-    """The commit to apply. Resolved here so a profile need not pin one."""
+    """The commit to apply. Resolved here so a profile need not pin one.
+
+    `ref~N` walks back N first parents, the way git spells it, so a profile can
+    name "the commit before the head" without pinning a sha that goes stale on
+    the next push.
+    """
     # HEAD resolves to the default branch, so no separate lookup for its name.
-    return gh("api", f"repos/{repo}/commits/{ref or 'HEAD'}", "--jq", ".sha").stdout.strip()
+    name, _, back = (ref or "HEAD").partition("~")
+    sha = gh("api", f"repos/{repo}/commits/{name}", "--jq", ".sha").stdout.strip()
+    for _ in range(int(back or 0)):
+        sha = gh("api", f"repos/{repo}/commits/{sha}", "--jq", ".parents[0].sha").stdout.strip()
+    return sha
 
 
 def caller_workflow_text(profile: Profile) -> str:

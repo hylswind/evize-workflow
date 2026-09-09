@@ -24,7 +24,9 @@ def boundary_document(protected=None):
     return policies.apply_boundary_policy(
         account_id=ACCOUNT_ID, region=REGION, resource_prefix="enclavize-",
         proof_bucket=PROOF, dashboard_bucket=DASHBOARD, domain="example.com",
-        hosted_zone_id="Z1EXAMPLE", state_machine="enclavize-apply", protected=protected,
+        hosted_zone_id="Z1EXAMPLE", state_machine="enclavize-apply",
+        switch_state_machine="enclavize-apply-switch", parameter_path="/enclavize/",
+        protected=protected,
     )
 
 
@@ -43,7 +45,15 @@ def inline_documents():
         ),
         "console-self-service": policies.console_self_service_policy(account_id=ACCOUNT_ID),
         "apply-role": policies.apply_role_policy(boundary_arn=BOUNDARY_ARN),
-        "apply-state-machine": policies.apply_state_machine_policy(dashboard_bucket=DASHBOARD),
+        "apply-state-machine": policies.apply_state_machine_policy(
+            region=REGION, account_id=ACCOUNT_ID, resource_prefix="enclavize-",
+            dashboard_bucket=DASHBOARD, switch_state_machine="enclavize-apply-switch",
+            schedule="enclavize-apply-switch", scheduler_role="enclavize-apply-scheduler",
+            instance_name_tag="enclavize-apply", parameter_path="/enclavize/",
+        ),
+        "apply-scheduler": policies.apply_scheduler_role_policy(
+            region=REGION, account_id=ACCOUNT_ID, switch_state_machine="enclavize-apply-switch",
+        ),
         "pass-role": policies.pass_role_policy(account_id=ACCOUNT_ID, role_name="enclavize-apply"),
     }
 
@@ -66,6 +76,7 @@ def test_iam_accepts_the_trust_policies(iam):
         ("ec2", policies.EC2_TRUST),
         ("sfn", policies.service_trust("states.amazonaws.com")),
         ("apigw", policies.service_trust("apigateway.amazonaws.com")),
+        ("scheduler", policies.scheduler_trust(account_id=ACCOUNT_ID, region=REGION)),
     ):
         iam.create_role(RoleName=f"probe-{name}", AssumeRolePolicyDocument=json.dumps(trust))
 

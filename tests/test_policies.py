@@ -14,20 +14,40 @@ BOUNDARY_ARN = f"arn:aws:iam::{ACCOUNT_ID}:policy/{PREFIX}apply-boundary"
 ZONE_ID = "Z1EXAMPLE"
 DOMAIN = "example.com"
 STATE_MACHINE = "enclavize-apply"
+SWITCH_MACHINE = "enclavize-apply-switch"
+SCHEDULE = "enclavize-apply-switch"
+SCHEDULER_ROLE = "enclavize-apply-scheduler"
+PARAMETER_PATH = "/enclavize/"
+ELB = f"arn:aws:elasticloadbalancing:{REGION}:{ACCOUNT_ID}"
 
 
-def boundary(protected=None):
+def boundary(protected=None, domain=DOMAIN):
     return policies.apply_boundary_policy(
         account_id=ACCOUNT_ID,
         region=REGION,
         resource_prefix=PREFIX,
         proof_bucket=PROOF_BUCKET,
         dashboard_bucket=DASHBOARD_BUCKET,
-        domain=DOMAIN,
+        domain=domain,
         hosted_zone_id=ZONE_ID,
         state_machine=STATE_MACHINE,
+        switch_state_machine=SWITCH_MACHINE,
+        parameter_path=PARAMETER_PATH,
         protected=protected,
     )
+
+
+def state_machine_policy():
+    return policies.apply_state_machine_policy(
+        region=REGION, account_id=ACCOUNT_ID, resource_prefix=PREFIX,
+        dashboard_bucket=DASHBOARD_BUCKET, switch_state_machine=SWITCH_MACHINE,
+        schedule=SCHEDULE, scheduler_role=SCHEDULER_ROLE, instance_name_tag="enclavize-apply",
+        parameter_path=PARAMETER_PATH,
+    )
+
+
+def denial(document, sid):
+    return [s for s in statements(document, "Deny") if s.get("Sid") == sid][0]
 
 
 def statements(document, effect=None):
@@ -40,7 +60,9 @@ def statements(document, effect=None):
 def actions_denied(document):
     denied = set()
     for statement in statements(document, "Deny"):
-        action = statement["Action"]
+        # A NotAction statement denies everything else on its resource; it
+        # names no action of its own to collect.
+        action = statement.get("Action", [])
         denied.update([action] if isinstance(action, str) else action)
     return denied
 
@@ -169,7 +191,7 @@ def test_the_state_machine_can_keep_the_index_it_has_to_rebuild():
     """Writing the record is not enough on its own. The dashboard is static and
     cannot list a bucket, so the index it reads is rebuilt from a listing on
     every apply — which needs the listing as well as the write."""
-    document = policies.apply_state_machine_policy(dashboard_bucket=DASHBOARD_BUCKET)
+    document = state_machine_policy()
     writes = next(s for s in statements(document, "Allow") if s["Action"] == "s3:PutObject")
     assert set(writes["Resource"]) == {
         f"arn:aws:s3:::{DASHBOARD_BUCKET}/{naming.APPLIES_PREFIX}*",
@@ -183,7 +205,7 @@ def test_the_state_machine_can_keep_the_index_it_has_to_rebuild():
 def test_the_state_machine_sees_nothing_else_in_the_bucket():
     """The page itself lives in the same bucket. Writing over it is not
     something an apply has any business doing."""
-    document = policies.apply_state_machine_policy(dashboard_bucket=DASHBOARD_BUCKET)
+    document = state_machine_policy()
     inside = f"arn:aws:s3:::{DASHBOARD_BUCKET}/"
     granted = [resource for statement in statements(document, "Allow")
                for resource in ([statement["Resource"]] if isinstance(statement["Resource"], str)
@@ -232,27 +254,31 @@ def test_the_enclaves_own_names_are_fully_protected():
         "route53:ChangeResourceRecordSetsNormalizedRecordNames"
     ]
     assert set(names) == {f"dashboard.{DOMAIN}", f"proof.{DOMAIN}", f"apply.{DOMAIN}"}
-    # The apex is not here: it belongs to the application apart from its MX.
+    # The apex is not here: it is protected by record type, not outright.
     assert DOMAIN not in names
 
 
 def test_the_apex_control_records_are_protected():
     """MX reopens the password-reset path; NS hands resolution of every name in
-    the domain — proof.{domain} included — to whoever the application picks."""
+    the domain — proof.{domain} included — to whoever the application picks;
+    and A/AAAA are where the front door answers, so repointing them would let
+    an application serve around the switch that keeps it healthy."""
     denied = [s for s in statements(boundary(), "Deny")
               if s["Sid"] == "CannotTouchTheApexControlRecords"]
     condition = denied[0]["Condition"]["ForAnyValue:StringEquals"]
     assert condition["route53:ChangeResourceRecordSetsNormalizedRecordNames"] == [DOMAIN]
-    assert set(condition["route53:ChangeResourceRecordSetsRecordTypes"]) == {"MX", "NS", "SOA"}
+    assert set(condition["route53:ChangeResourceRecordSetsRecordTypes"]) == {
+        "MX", "NS", "SOA", "A", "AAAA",
+    }
 
 
-def test_an_application_can_use_the_apex_for_its_own_records():
+def test_an_application_can_still_use_the_apex_for_its_own_records():
     apex = [s for s in statements(boundary(), "Deny")
             if s["Sid"] == "CannotTouchTheApexControlRecords"][0]
     types = apex["Condition"]["ForAnyValue:StringEquals"][
         "route53:ChangeResourceRecordSetsRecordTypes"
     ]
-    for allowed in ("A", "AAAA", "TXT", "SRV", "CNAME"):
+    for allowed in ("TXT", "SRV", "CNAME", "CAA"):
         assert allowed not in types
 
 
@@ -273,11 +299,7 @@ def test_the_boundary_does_not_defend_the_mirrors_uptime():
 
 def test_protected_record_names_are_normalised():
     # The condition key is matched against lowercase names with no trailing dot.
-    document = policies.apply_boundary_policy(
-        account_id=ACCOUNT_ID, region=REGION, resource_prefix=PREFIX,
-        proof_bucket=PROOF_BUCKET, dashboard_bucket=DASHBOARD_BUCKET,
-        domain="Example.COM.", hosted_zone_id=ZONE_ID, state_machine=STATE_MACHINE,
-    )
+    document = boundary(domain="Example.COM.")
     for sid in ("CannotTouchTheEnclavesOwnNames", "CannotTouchTheApexControlRecords"):
         denied = [s for s in statements(document, "Deny") if s["Sid"] == sid][0]
         names = denied["Condition"]["ForAnyValue:StringEquals"][
@@ -330,6 +352,8 @@ def test_the_machinery_denial_narrows_to_named_resources():
 
     assert resources != "*"
     assert f"arn:aws:states:{REGION}:{ACCOUNT_ID}:stateMachine:{STATE_MACHINE}" in resources
+    assert f"arn:aws:states:{REGION}:{ACCOUNT_ID}:stateMachine:{SWITCH_MACHINE}" in resources
+    assert f"arn:aws:states:{REGION}:{ACCOUNT_ID}:execution:{SWITCH_MACHINE}:*" in resources
     assert f"arn:aws:apigateway:{REGION}::/restapis/abc123" in resources
     assert f"arn:aws:cloudfront::{ACCOUNT_ID}:distribution/E1" in resources
     assert f"arn:aws:cloudfront::{ACCOUNT_ID}:distribution/E2" in resources
@@ -357,3 +381,120 @@ def test_a_narrowed_boundary_leaves_other_resources_of_those_services_alone():
     assert not any("otherapi" in r for r in denied[0]["Resource"])
     # Nor its own custom domains.
     assert not any(f"/domainnames/www.{DOMAIN}" in r for r in denied[0]["Resource"])
+
+
+# --- the front door and the switch ----------------------------------------
+
+
+def test_the_front_door_is_fenced_off_by_name():
+    """The balancer, its listeners and every target group a switch makes all
+    carry the enclave's prefix, so they are named from the start rather than
+    narrowed to later. An application's own balancers are not touched."""
+    fence = denial(boundary(), "CannotTouchTheFrontDoor")
+    assert fence["Action"] == "elasticloadbalancing:*"
+    assert set(fence["Resource"]) == {
+        f"{ELB}:loadbalancer/app/{PREFIX}*/*",
+        f"{ELB}:listener/app/{PREFIX}*/*/*",
+        f"{ELB}:listener-rule/app/{PREFIX}*/*/*/*",
+        f"{ELB}:targetgroup/{PREFIX}*/*",
+    }
+    assert not any("otherapp" in r for r in fence["Resource"])
+
+
+def test_the_switch_timer_is_fenced_off_by_name():
+    fence = denial(boundary(), "CannotTouchTheSwitchTimer")
+    assert fence["Action"] == "scheduler:*"
+    assert fence["Resource"] == f"arn:aws:scheduler:{REGION}:{ACCOUNT_ID}:schedule/default/{PREFIX}*"
+
+
+def test_the_enclaves_parameters_are_read_only_to_an_application():
+    """The two under apply/ are how a version learns what is serving and what
+    is coming; being able to write them would let it tell itself anything.
+    NotAction, so every write is denied without having to list each one."""
+    fence = denial(boundary(), "CanOnlyReadTheEnclavesParameters")
+    assert "Action" not in fence
+    assert set(fence["NotAction"]) == {
+        "ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath",
+        "ssm:GetParameterHistory", "ssm:DescribeParameters",
+    }
+    # Everything under the enclave's path — the go flag included.
+    assert fence["Resource"] == f"arn:aws:ssm:{REGION}:{ACCOUNT_ID}:parameter/enclavize/*"
+
+
+def test_the_enclaves_instances_and_groups_are_fenced_off_by_tag():
+    """The instances a switch is between have no fixed ARN, so they are
+    recognised by the name they are tagged with."""
+    fence = denial(boundary(), "CannotTouchTheEnclavesInstancesOrGroups")
+    assert {"ec2:TerminateInstances", "ec2:StopInstances", "ec2:RebootInstances",
+            "ec2:AuthorizeSecurityGroupIngress", "ec2:RevokeSecurityGroupIngress",
+            "ec2:ModifySecurityGroupRules", "ec2:DeleteSecurityGroup",
+            # Renamed, an instance would slip past the switch that retires it
+            # by name and the teardown that finds it the same way.
+            "ec2:CreateTags", "ec2:DeleteTags"} <= set(fence["Action"])
+    assert fence["Resource"] == "*"
+    assert fence["Condition"] == {"StringLike": {"aws:ResourceTag/Name": f"{PREFIX}*"}}
+
+
+def test_the_enclaves_name_cannot_be_worn_by_anything_else():
+    # The tag rule is only as good as the tag.
+    fence = denial(boundary(), "CannotWearTheEnclavesName")
+    assert fence["Action"] == "ec2:CreateTags"
+    assert fence["Condition"] == {"StringLike": {"aws:RequestTag/Name": f"{PREFIX}*"}}
+
+
+def test_the_state_machine_may_only_retire_the_enclaves_own_instances():
+    """Terminating is the one power that could reach an application's own
+    instance, so it is held to the name apply instances are tagged with."""
+    document = state_machine_policy()
+    terminate = next(s for s in statements(document, "Allow")
+                     if s["Action"] == "ec2:TerminateInstances")
+    assert terminate["Condition"] == {"StringEquals": {"aws:ResourceTag/Name": "enclavize-apply"}}
+
+
+def test_the_state_machine_writes_only_to_the_enclaves_own_groups_and_listener():
+    document = state_machine_policy()
+    writes = next(s for s in statements(document, "Allow")
+                  if "elasticloadbalancing:ModifyListener" in s["Action"])
+    assert set(writes["Resource"]) == {
+        f"{ELB}:targetgroup/{PREFIX}*/*",
+        f"{ELB}:listener/app/{PREFIX}*/*/*",
+    }
+    assert "elasticloadbalancing:CreateLoadBalancer" not in writes["Action"]
+    assert "elasticloadbalancing:DeleteLoadBalancer" not in writes["Action"]
+
+
+def test_the_state_machine_may_pass_only_the_timers_role_and_only_to_the_timer():
+    document = state_machine_policy()
+    passing = next(s for s in statements(document, "Allow") if s["Action"] == "iam:PassRole")
+    assert passing["Resource"] == f"arn:aws:iam::{ACCOUNT_ID}:role/{SCHEDULER_ROLE}"
+    assert passing["Condition"] == {"StringEquals": {"iam:PassedToService": "scheduler.amazonaws.com"}}
+
+
+def test_the_state_machine_sees_only_the_enclaves_own_parameters():
+    document = state_machine_policy()
+    params = next(s for s in statements(document, "Allow") if "ssm:PutParameter" in s["Action"])
+    assert params["Resource"] == f"arn:aws:ssm:{REGION}:{ACCOUNT_ID}:parameter/enclavize/apply/*"
+
+
+def test_the_timer_can_start_the_switch_and_nothing_else():
+    document = policies.apply_scheduler_role_policy(
+        region=REGION, account_id=ACCOUNT_ID, switch_state_machine=SWITCH_MACHINE
+    )
+    assert document["Statement"] == [{
+        "Effect": "Allow",
+        "Action": "states:StartExecution",
+        "Resource": f"arn:aws:states:{REGION}:{ACCOUNT_ID}:stateMachine:{SWITCH_MACHINE}",
+    }]
+
+
+def test_the_timers_role_can_only_be_assumed_on_this_accounts_behalf():
+    """Both conditions, or a schedule in any account could name this role. The
+    source has to be the schedule group: Scheduler evaluates the condition
+    against the group, and a schedule-shaped ARN never matches."""
+    trust = policies.scheduler_trust(account_id=ACCOUNT_ID, region=REGION)
+    statement = trust["Statement"][0]
+    assert statement["Principal"] == {"Service": "scheduler.amazonaws.com"}
+    assert statement["Condition"]["StringEquals"] == {
+        "aws:SourceAccount": ACCOUNT_ID,
+        "aws:SourceArn": f"arn:aws:scheduler:{REGION}:{ACCOUNT_ID}:schedule-group/default",
+    }

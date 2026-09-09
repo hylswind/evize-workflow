@@ -20,7 +20,7 @@ from botocore.exceptions import ClientError
 # Run directly as a script, so the repo root has to be found rather than assumed.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
-from enclavize.aws import iam as iammod, s3 as s3mod  # noqa: E402
+from enclavize.aws import ec2 as ec2mod, elbv2 as elbmod, iam as iammod, s3 as s3mod  # noqa: E402
 
 
 def check_account(session) -> str:
@@ -40,6 +40,7 @@ def find(session, prefix: str) -> list:
     iam = session.client("iam")
     s3 = session.client("s3")
     ec2 = session.client("ec2")
+    elbv2 = session.client("elbv2")
     found = []
 
     for page in iam.get_paginator("list_users").paginate():
@@ -81,6 +82,18 @@ def find(session, prefix: str) -> list:
 
     for vpc in ec2.describe_vpcs(Filters=[{"Name": "tag:Name", "Values": [f"{prefix}*"]}])["Vpcs"]:
         found.append(("vpc", vpc["VpcId"], lambda v=vpc["VpcId"]: ec2.delete_vpc(VpcId=v)))
+
+    # Deleted in this order: a balancer holds its listeners and its security
+    # group, and a target group is refused while a listener forwards to it.
+    for balancer in elbmod.load_balancers_named(elbv2, prefix):
+        found.append(("load-balancer", balancer["name"],
+                      lambda a=balancer["arn"]: elbmod.delete_load_balancer(elbv2, a)))
+    for group in elbmod.target_groups_named(elbv2, prefix):
+        found.append(("target-group", group["name"],
+                      lambda a=group["arn"]: elbmod.delete_target_group(elbv2, a)))
+    for group_id, name in ec2mod.security_groups_named(ec2, prefix):
+        found.append(("security-group", name,
+                      lambda g=group_id: ec2mod.delete_security_group(ec2, g)))
 
     return found
 

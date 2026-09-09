@@ -6,10 +6,17 @@ rearrange the account's resources, or both. The account is whatever the last
 applied commit made it.
 
 An API key opens a REST endpoint that starts an Express state machine, which
-launches one instance to clone that commit and run it. The instance carries a
-role capped by a permission boundary, so a commit can build whatever it likes
-and still cannot touch the enclave: not the identities, not the sign-in lock,
-not the domain, not the proof, and not this machinery.
+decides: refuse if a switch is already pending or under way, switch at once if
+nothing is serving yet, and otherwise schedule the switch for later and tell
+the version currently serving what is coming. A Standard state machine does the
+switch itself — one instance behind the load balancer built at bring-up, put
+into service only once the balancer sees it healthy, and the previous instance
+retired after it.
+
+The instance carries a role capped by a permission boundary, so a commit can
+build whatever it likes and still cannot touch the enclave: not the
+identities, not the sign-in lock, not the domain, not the proof, not the front
+door, and not this machinery.
 
 The boundary also propagates — an applied commit may only create principals that
 carry it — so the fence does not end at the first role a commit makes for
@@ -18,10 +25,16 @@ itself.
 
 import json
 
-from enclavize.aws import apigw, dns, ec2, iam, sfn
-from enclavize.logic import naming, policies, statemachine
+from enclavize.aws import apigw, dns, ec2, elbv2, iam, sfn
+from enclavize.logic import naming, policies, statemachine, switchmachine
 
 from . import config
+
+
+def switch_state_machine_arn(*, res, region: str, account_id: str) -> str:
+    """Known before the machine exists, which is what lets the receiving
+    machine and the roles name it first."""
+    return f"arn:aws:states:{region}:{account_id}:stateMachine:{res.apply_switch_state_machine}"
 
 
 def boundary_document(*, res, account_id: str, region: str, proof_bucket: str,
@@ -35,6 +48,8 @@ def boundary_document(*, res, account_id: str, region: str, proof_bucket: str,
         domain=domain,
         hosted_zone_id=hosted_zone_id,
         state_machine=res.apply_state_machine,
+        switch_state_machine=res.apply_switch_state_machine,
+        parameter_path=res.apply_param_prefix(),
         protected=protected,
     )
 
@@ -60,7 +75,7 @@ def tighten_boundary(iam_client, *, res, account_id: str, region: str, proof_buc
 
 def create_roles(iam_client, *, res, account_id: str, region: str, proof_bucket: str,
                  dashboard_bucket: str, domain: str, hosted_zone_id: str) -> dict:
-    """The boundary, the apply instance role, and the two service roles."""
+    """The boundary, the apply instance role, and the three service roles."""
     boundary_arn = iam.create_policy(
         iam_client,
         name=res.apply_boundary,
@@ -89,21 +104,44 @@ def create_roles(iam_client, *, res, account_id: str, region: str, proof_bucket:
     )
     iam.create_instance_profile(iam_client, name=res.apply_role, role=res.apply_role)
 
+    # One role for both workflows: the same service principal, and the
+    # receiving one's few permissions are a subset of the switching one's.
     sfn_role_arn = iam.create_role(
         iam_client,
         name=res.apply_sfn_role,
         trust=policies.service_trust("states.amazonaws.com"),
-        description="enclavize: the apply state machine",
+        description="enclavize: the apply workflows",
     )
     iam.put_role_policy(
-        iam_client, role=res.apply_sfn_role, name="launch-and-record",
-        document=policies.apply_state_machine_policy(dashboard_bucket=dashboard_bucket),
+        iam_client, role=res.apply_sfn_role, name="receive-switch-and-record",
+        document=policies.apply_state_machine_policy(
+            region=region, account_id=account_id, resource_prefix=res.prefix,
+            dashboard_bucket=dashboard_bucket,
+            switch_state_machine=res.apply_switch_state_machine,
+            schedule=res.apply_switch_schedule, scheduler_role=res.apply_scheduler_role,
+            instance_name_tag=res.apply_state_machine,
+            parameter_path=res.apply_param_prefix(),
+        ),
     )
-    # Passing any other role — the admin one above all — would step around the
-    # boundary entirely.
+    # Passing any other role to an instance — the admin one above all — would
+    # step around the boundary entirely.
     iam.put_role_policy(
         iam_client, role=res.apply_sfn_role, name="pass-only-the-apply-role",
         document=policies.pass_role_policy(account_id=account_id, role_name=res.apply_role),
+    )
+
+    scheduler_role_arn = iam.create_role(
+        iam_client,
+        name=res.apply_scheduler_role,
+        trust=policies.scheduler_trust(account_id=account_id, region=region),
+        description="enclavize: the timer that starts a delayed switch",
+    )
+    iam.put_role_policy(
+        iam_client, role=res.apply_scheduler_role, name="start-the-switch",
+        document=policies.apply_scheduler_role_policy(
+            region=region, account_id=account_id,
+            switch_state_machine=res.apply_switch_state_machine,
+        ),
     )
 
     api_role_arn = iam.create_role(
@@ -115,25 +153,133 @@ def create_roles(iam_client, *, res, account_id: str, region: str, proof_bucket:
     return {
         "boundary_arn": boundary_arn,
         "sfn_role_arn": sfn_role_arn,
+        "scheduler_role_arn": scheduler_role_arn,
         "api_role_arn": api_role_arn,
     }
 
 
-def create_state_machine(sfn_client, ec2_client, ssm_client, *, res, app_repo: str, region: str,
-                         domain: str, dashboard_bucket: str, role_arn: str, ami_param: str,
-                         instance_type: str) -> str:
+def create_front_door(ec2_client, elbv2_client, *, res) -> dict:
+    """The load balancer every applied version will sit behind, in the default
+    VPC across all of its default subnets. Needs no certificate, so it is built
+    while the certificate is still validating; the HTTPS listener that needs
+    one comes later, in attach_front_door.
+
+    Two groups: the balancer's admits the world on 80 and 443, and the
+    instances' admits the balancer's group on the application port and nothing
+    else. An applied instance is reachable through the front door only.
+    """
+    vpc_id = ec2.default_vpc(ec2_client)
+    subnets = ec2.default_subnets(ec2_client, vpc_id)
+
+    lb_sg = ec2.create_security_group(
+        ec2_client, name=res.app_lb_sg, description="enclavize: the front door", vpc_id=vpc_id,
+    )
+    for port in (80, 443):
+        ec2.authorize_ingress(ec2_client, group_id=lb_sg, port=port)
+    app_sg = ec2.create_security_group(
+        ec2_client, name=res.app_sg, description="enclavize: an applied version, reachable "
+        "only through the front door", vpc_id=vpc_id,
+    )
+    ec2.authorize_ingress(ec2_client, group_id=app_sg, port=config.APP_PORT, source_group_id=lb_sg)
+
+    balancer = elbv2.create_load_balancer(
+        elbv2_client, name=res.app_lb, subnets=subnets, security_groups=[lb_sg],
+    )
+    elbv2.create_redirect_listener(elbv2_client, load_balancer_arn=balancer["arn"])
+    return {
+        "lb_arn": balancer["arn"],
+        "dns_name": balancer["dns_name"],
+        "zone_id": balancer["zone_id"],
+        "vpc_id": vpc_id,
+        "subnet_id": subnets[0],
+        "app_sg_id": app_sg,
+    }
+
+
+def attach_front_door(elbv2_client, r53_client, *, res, front_door: dict, certificate_arn: str,
+                      domain: str, zone_id: str, poll_max: int, interval: int) -> dict:
+    """The HTTPS listener and the apex record. Returns the listener's ARN, which
+    the switch state machine needs, and whether the balancer is active yet.
+
+    Must follow the certificate: a listener on 443 is rejected without one. The
+    listener starts out answering a fixed response — the switch is what first
+    forwards it anywhere.
+    """
+    listener_arn = elbv2.create_https_listener(
+        elbv2_client, load_balancer_arn=front_door["lb_arn"], certificate_arn=certificate_arn,
+        status_code=config.FRONT_DOOR_FALLBACK_STATUS, body=config.FRONT_DOOR_FALLBACK_BODY,
+    )
+    dns.change_records(
+        r53_client,
+        zone_id=zone_id,
+        changes=[
+            dns.upsert_alias(
+                domain, target_dns=front_door["dns_name"], hosted_zone_id=front_door["zone_id"],
+            )
+        ],
+        comment="enclavize front door",
+    )
+    active = elbv2.await_active(
+        elbv2_client, front_door["lb_arn"], poll_max=poll_max, interval=interval,
+    )
+    return {"listener_arn": listener_arn, "active": active}
+
+
+def create_state_machine(sfn_client, *, res, region: str, account_id: str, dashboard_bucket: str,
+                         role_arn: str, scheduler_role_arn: str, delay_seconds: int) -> str:
+    """The receiving machine. Names the switching one by its derived ARN, so it
+    can be built during the certificate wait while the switch waits for the
+    listener."""
     definition = statemachine.build_definition(
+        dashboard_bucket=dashboard_bucket,
+        switch_state_machine_arn=switch_state_machine_arn(res=res, region=region, account_id=account_id),
+        schedule_name=res.apply_switch_schedule,
+        scheduler_role_arn=scheduler_role_arn,
+        current_param=res.apply_current_param,
+        pending_param=res.apply_pending_param,
+        delay_seconds=delay_seconds,
+        in_flight_error=apigw.IN_FLIGHT_ERROR,
+    )
+    return sfn.create_state_machine(
+        sfn_client, name=res.apply_state_machine, definition=definition, role_arn=role_arn,
+    )
+
+
+def create_switch_machine(sfn_client, ec2_client, ssm_client, *, res, app_repo: str, region: str,
+                          domain: str, dashboard_bucket: str, role_arn: str, ami_param: str,
+                          instance_type: str, front_door: dict, listener_arn: str) -> str:
+    """The switching machine, Standard because it waits. Follows the listener,
+    whose ARN it has to carry."""
+    definition = switchmachine.build_definition(
         app_repo=app_repo,
         domain=domain,
         image_id=ec2.resolve_ami(ssm_client, ami_param),
         instance_type=instance_type,
-        subnet_id=ec2.default_subnet(ec2_client),
+        subnet_id=front_door["subnet_id"],
+        security_group_id=front_door["app_sg_id"],
+        vpc_id=front_door["vpc_id"],
         instance_profile=res.apply_role,
-        dashboard_bucket=dashboard_bucket,
         name_tag=res.apply_state_machine,
+        resource_prefix=res.prefix,
+        listener_arn=listener_arn,
+        app_port=config.APP_PORT,
+        health_path=config.HEALTH_PATH,
+        health_interval=config.HEALTH_INTERVAL_SECONDS,
+        health_timeout=config.HEALTH_TIMEOUT_SECONDS,
+        healthy_threshold=config.HEALTHY_THRESHOLD,
+        unhealthy_threshold=config.UNHEALTHY_THRESHOLD,
+        healthy_poll_interval=config.SWITCH_HEALTHY_POLL_INTERVAL,
+        healthy_poll_attempts=config.SWITCH_HEALTHY_POLL_MAX_SECONDS // config.SWITCH_HEALTHY_POLL_INTERVAL,
+        drain_seconds=config.DRAIN_SECONDS,
+        dashboard_bucket=dashboard_bucket,
+        current_param=res.apply_current_param,
+        pending_param=res.apply_pending_param,
+        fallback_status_code=config.FRONT_DOOR_FALLBACK_STATUS,
+        fallback_body=config.FRONT_DOOR_FALLBACK_BODY,
     )
     return sfn.create_state_machine(
-        sfn_client, name=res.apply_state_machine, definition=definition, role_arn=role_arn
+        sfn_client, name=res.apply_switch_state_machine, definition=definition,
+        role_arn=role_arn, kind=sfn.STANDARD,
     )
 
 

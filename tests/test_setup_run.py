@@ -55,11 +55,19 @@ def journal(monkeypatch):
     monkeypatch.setattr(bringup.cdn, "await_deployed", step("cdn_deployed", True))
     monkeypatch.setattr(bringup.apply, "create_roles", step("apply_roles", {
         "boundary_arn": "arn:b", "sfn_role_arn": "arn:sfn", "api_role_arn": "arn:api",
+        "scheduler_role_arn": "arn:sched",
+    }))
+    monkeypatch.setattr(bringup.apply, "create_front_door", step("front_door", {
+        "lb_arn": "arn:lb", "dns_name": "lb.elb.amazonaws.com", "zone_id": "ZLB",
+        "vpc_id": "vpc-1", "subnet_id": "subnet-1", "app_sg_id": "sg-app",
     }))
     monkeypatch.setattr(bringup.apply, "create_state_machine", step("apply_sfn", "arn:sm"))
     monkeypatch.setattr(bringup.apply, "create_api", step("apply_api", ("https://x/v1/commits", "api1")))
     monkeypatch.setattr(bringup.apply, "attach_custom_domain",
                         step("apply_domain", "https://apply.example.com/v1/commits"))
+    monkeypatch.setattr(bringup.apply, "attach_front_door",
+                        step("front_door_attach", {"listener_arn": "arn:listener", "active": True}))
+    monkeypatch.setattr(bringup.apply, "create_switch_machine", step("apply_switch_sfn", "arn:sw"))
     monkeypatch.setattr(bringup.apply, "tighten_boundary", step("tighten_boundary"))
     monkeypatch.setattr(bringup.proof, "attach_cdn", step("proof_cdn", {"id": "E2"}))
     monkeypatch.setattr(bringup.proof, "await_and_seal", step("proof_seal", True))
@@ -110,11 +118,31 @@ def test_the_registrar_is_pointed_at_the_new_zone_before_the_certificate_issues(
 
 def test_the_apply_machinery_is_built_during_the_certificate_wait(journal):
     """It needs only the account and the bucket names, so waiting for a
-    certificate first would waste its whole duration."""
+    certificate first would waste its whole duration. The load balancer too:
+    it takes minutes to come up, and only its HTTPS listener needs the
+    certificate."""
     run()
     cert = journal.index("cert_issued")
-    for step_name in ("apply_roles", "apply_sfn", "apply_api"):
+    for step_name in ("apply_roles", "front_door", "apply_sfn", "apply_api"):
         assert journal.index(step_name) < cert, step_name
+
+
+def test_both_certificates_are_requested_together_and_both_awaited(journal):
+    """The apex rides on a certificate of its own; requested beside the first,
+    it validates in the same wait rather than after it."""
+    run()
+    assert journal.count("cert_request") == 2
+    assert journal.count("cert_issued") == 2
+    assert journal.index("update_ns") > max(i for i, s in enumerate(journal) if s == "cert_records")
+
+
+def test_the_front_door_opens_after_the_certificate_and_the_switch_follows_it(journal):
+    """A listener on 443 is rejected without a certificate, and the switch
+    machine carries that listener's ARN, so it cannot be built before it."""
+    run()
+    assert journal.index("cert_issued") < journal.index("front_door_attach")
+    assert journal.index("front_door_attach") < journal.index("apply_switch_sfn")
+    assert journal.index("apply_switch_sfn") < journal.index("tighten_boundary")
 
 
 def test_the_state_it_reports_is_not_cached_like_the_rest():
@@ -174,19 +202,25 @@ def test_the_full_order(journal):
         "dashboard_bucket",
         "hosted_zone",
         "records",          # null MX, fired and not awaited
-        "cert_request",
+        "cert_request",     # the enclave's three names
+        "cert_request",     # the apex, for the front door
         "cert_records",
-        "records",          # the validation records
+        "cert_records",
+        "records",          # the validation records, both certificates' at once
         # hand over the domain, then fill the wait with work that does not need
         # the certificate
         "update_ns",
         "apply_roles",
+        "front_door",
         "apply_sfn",
         "apply_api",
         "dashboard_mark",
         "cert_issued",
-        # everything the certificate was blocking
+        "cert_issued",
+        # everything the certificates were blocking
         "apply_domain",
+        "front_door_attach",
+        "apply_switch_sfn",
         "dashboard_cdn",
         "proof_cdn",
         "cdn_deployed",
@@ -334,8 +368,21 @@ def test_the_page_reads_everything_it_shows_from_its_own_bucket():
 
 def test_the_page_has_somewhere_to_put_each_field():
     page = asset("index.html")
-    for element in ('id="domain"', 'id="state"', 'id="repo"', 'id="applies"'):
+    for element in ('id="domain"', 'id="state"', 'id="repo"', 'id="applies"',
+                    'id="serving"', 'id="next"'):
         assert element in page
+
+
+def test_the_page_reads_each_apply_record_for_its_outcome():
+    """A listing says only that an apply happened. Whether it is serving,
+    waiting or gone is in the record, so the page fetches those too — and
+    shows what is serving and what is coming off the same records as the log,
+    so the two cannot disagree."""
+    script = asset("app.js")
+    assert "read(`./${record.key}`)" in script
+    for outcome in ("scheduled", "switching", "live", "retired", "failed"):
+        assert f'"{outcome}"' in script or f"{outcome}:" in script, outcome
+    assert 'r.status === "live"' in script
 
 
 # --- self-termination -----------------------------------------------------

@@ -21,6 +21,7 @@ from harness import STATE_FILE, dig, fetch, poll, verify_attestation
 
 from enclavize.aws import dns as dnsmod
 from enclavize.aws import domains as domainsmod
+from enclavize.aws import elbv2 as elbmod
 from enclavize.aws import s3 as s3mod
 from enclavize.logic import naming
 from setup import apply as setup_apply
@@ -237,10 +238,80 @@ def test_the_apply_endpoint_has_its_own_name(rescue, profile):
 def test_the_apply_machinery_exists(rescue):
     iam = rescue.client("iam")
     for role in (SETUP_RESOURCES.apply_role, SETUP_RESOURCES.apply_sfn_role,
-                 SETUP_RESOURCES.apply_api_role):
+                 SETUP_RESOURCES.apply_api_role, SETUP_RESOURCES.apply_scheduler_role):
         iam.get_role(RoleName=role)
-    machines = rescue.client("stepfunctions").list_state_machines()["stateMachines"]
-    assert SETUP_RESOURCES.apply_state_machine in {m["name"] for m in machines}
+    machines = {m["name"]: m for m in
+                rescue.client("stepfunctions").list_state_machines()["stateMachines"]}
+    assert SETUP_RESOURCES.apply_state_machine in machines
+    assert SETUP_RESOURCES.apply_switch_state_machine in machines
+    # The receiving one answers inside API Gateway's timeout; the switching
+    # one waits for an instance, so it cannot be Express.
+    assert machines[SETUP_RESOURCES.apply_state_machine]["type"] == "EXPRESS"
+    assert machines[SETUP_RESOURCES.apply_switch_state_machine]["type"] == "STANDARD"
+
+
+# --- the front door -------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def front_door(rescue):
+    elbv2 = rescue.client("elbv2")
+    found = elbmod.load_balancers_named(elbv2, SETUP_RESOURCES.prefix)
+    assert [b["name"] for b in found] == [SETUP_RESOURCES.app_lb], found
+    described = elbv2.describe_load_balancers(LoadBalancerArns=[found[0]["arn"]])["LoadBalancers"][0]
+    listeners = elbv2.describe_listeners(LoadBalancerArn=found[0]["arn"])["Listeners"]
+    return {"balancer": described, "listeners": {l["Port"]: l for l in listeners}}
+
+
+def test_the_front_door_is_up_across_more_than_one_zone(front_door):
+    balancer = front_door["balancer"]
+    assert balancer["State"]["Code"] == "active"
+    assert balancer["Scheme"] == "internet-facing"
+    assert len(balancer["AvailabilityZones"]) >= 2
+
+
+def test_the_front_door_answers_nothing_until_a_version_is_switched_in(front_door, rescue, profile):
+    """The switch is what first forwards the listener anywhere. Until then it
+    says so, with the apex certificate — its own, issued for the domain."""
+    https = front_door["listeners"][443]
+    assert https["DefaultActions"][0]["Type"] == "fixed-response"
+    assert https["DefaultActions"][0]["FixedResponseConfig"]["StatusCode"] == str(
+        setup_config.FRONT_DOOR_FALLBACK_STATUS)
+    certificate = rescue.client("acm").describe_certificate(
+        CertificateArn=https["Certificates"][0]["CertificateArn"]
+    )["Certificate"]
+    assert certificate["DomainName"] == profile.domain
+    assert certificate["Status"] == "ISSUED"
+
+    assert front_door["listeners"][80]["DefaultActions"][0]["Type"] == "redirect"
+
+
+def test_the_apex_points_at_the_front_door(front_door, rescue, profile, zone_id):
+    records = rescue.client("route53").list_resource_record_sets(
+        HostedZoneId=zone_id, StartRecordName=f"{profile.domain}.", StartRecordType="A",
+    )["ResourceRecordSets"]
+    apex = [r for r in records if r["Name"].rstrip(".") == profile.domain and r["Type"] == "A"]
+    assert apex, "no A record at the apex"
+    target = apex[0]["AliasTarget"]["DNSName"].rstrip(".").lower()
+    assert target.endswith(front_door["balancer"]["DNSName"].lower())
+
+
+def test_the_front_door_is_reachable_from_outside(profile):
+    """DNS, the apex certificate and the balancer, from the public side. The
+    answer is the fallback, because nothing has been applied yet."""
+    code, body = fetch(f"https://{profile.domain}/")
+    assert code == setup_config.FRONT_DOOR_FALLBACK_STATUS, body[:200]
+
+
+def test_both_certificates_were_issued(rescue, profile):
+    acm = rescue.client("acm")
+    names = {
+        c["DomainName"]: c["Status"]
+        for page in acm.get_paginator("list_certificates").paginate()
+        for c in page["CertificateSummaryList"]
+    }
+    for name in (naming.dashboard_host(profile.domain), profile.domain):
+        assert names.get(name) == "ISSUED", (name, names)
 
 
 def test_the_boundary_was_narrowed_to_the_enclaves_own_resources(rescue, profile, account_id, zone_id):

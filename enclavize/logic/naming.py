@@ -106,3 +106,23 @@ def apply_host(domain: str) -> str:
     can look it up. This name is derivable from the domain alone.
     """
     return f"apply.{domain}"
+
+
+def apply_param_name(prefix: str, which: str) -> str:
+    """The parameters an applied commit reads to learn what is serving and what
+    is coming: `/enclavize/apply/current` and `/enclavize/apply/pending`.
+
+    Under the same path as the go flag, so one read-only rule in the boundary
+    covers everything of the enclave's in Parameter Store.
+    """
+    return f"/{prefix.strip('-')}/apply/{which}"
+
+
+def target_group_name(prefix: str, run_id: str) -> str:
+    """One target group per switch, named for the run rather than the commit.
+
+    The same commit can be applied twice, and the group from the first may still
+    be live when the second begins — so the name has to be unique per attempt.
+    Target group names allow only letters, digits and hyphens, up to 32.
+    """
+    return f"{prefix}app-{run_id}"

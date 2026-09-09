@@ -238,19 +238,56 @@ so however long the account runs, all of its history stays reachable.
 
 ## 8. Applying a commit
 
-An apply runs one commit's `setup.sh` inside the account. What that script does
-is its own business: ship a new version of the application, rearrange the
-account's resources, or both.
+An apply runs one commit's `setup.sh` on a fresh instance inside the account,
+and once that instance is healthy, switches `https://{domain}` to it. What the
+script does is its own business: ship a new version of the application,
+rearrange the account's resources, or both.
 
 ### What the application repo must look like
 
-**One thing: an executable `setup.sh` at the repository root.** That is the
-whole interface. An instance clones the repo at the commit you name, checks it
-out, and runs that script as root with `ENCLAVIZE_DOMAIN` set — the domain this
-account holds, and where the application builds its own names.
+**An executable `setup.sh` at the repository root.** An instance clones the
+repo at the commit you name, checks it out, and runs that script as root with
+`ENCLAVIZE_DOMAIN` set — the domain this account holds, and the name the
+instance will answer at.
+
+**When it is ready to serve, it listens on port 80 and answers `GET /healthz`
+with 200.** Plain HTTP; the load balancer in front of it terminates TLS. Until
+the instance is ready it should refuse the connection or answer anything but
+200, because 200 is what moves traffic to it: the balancer checks every 10
+seconds, gives up on a check after 5, and calls the instance healthy after two
+passes. Nothing reaches the instance except through the balancer.
 
 It runs with `AdministratorAccess`, capped by a permission boundary — so it can
 build whatever the application needs and still cannot touch the enclave.
+
+### What happens to a commit
+
+The first apply after a bring-up switches at once: there is nothing serving to
+protect. Every later apply waits `SWITCH_DELAY_SECONDS` (`setup/config.py`,
+five minutes while this is being proven) before it begins, and in the meantime
+the version currently serving can read what is coming:
+
+```
+aws ssm get-parameter --name /enclavize/apply/pending   # {"commit": …, "switchAt": "…Z"}
+aws ssm get-parameter --name /enclavize/apply/current   # {"commit", "instanceId", "since", …}
+```
+
+`pending` is written the moment the apply is accepted and removed once the
+switch has happened or failed; an application that needs to drain, snapshot or
+warn its users has until `switchAt` to do it. The delay is baked into the
+account when it is sealed, so changing the constant changes the next account,
+not this one.
+
+When the switch begins: a new instance is launched into its own target group,
+put on the listener with no weight so the balancer starts checking it, and
+given an hour to pass. Then the listener moves to it in one change, the
+previous instance is drained for 30 seconds, terminated, and its target group
+deleted. An instance that never passes is terminated instead, and the previous
+version keeps serving.
+
+One apply at a time. While one is waiting or switching, another is refused.
+
+### If it creates a role or a user
 
 ### If it creates a role or a user
 
@@ -295,15 +332,24 @@ curl -X POST https://apply.{domain}/v1/commits \
 ```
 
 ```json
-{"commit": "b5cdb1ce…", "instanceId": "i-0abc…", "status": "launched"}
+{"commit": "b5cdb1ce…", "status": "switching", "switchAt": "2026-09-08T10:22:31.123Z"}
+{"commit": "b5cdb1ce…", "status": "scheduled", "switchAt": "2026-09-08T10:27:31.123Z"}
 ```
 
-`launched`, not `applied`: the instance has only just started. It answers
-immediately rather than waiting, because both the Express workflow behind it and
-API Gateway's integration time out well before a real `setup.sh` could finish.
+`switching` or `scheduled`, never `applied`: the switch has only just started,
+or not yet. It answers immediately rather than waiting, because both the
+Express workflow behind it and API Gateway's integration time out well before
+a real `setup.sh` could finish. The dashboard is where it is watched.
 
-The commit must be a full 40-hex sha — not a tag, not a short one. Anything else
-is refused with **400**, and a wrong key with **403**; neither starts anything.
+| answer | meaning |
+|---|---|
+| **200** `switching` | nothing was serving; the switch started now |
+| **200** `scheduled` | a version is serving; the switch starts at `switchAt` |
+| **409** `ApplyInFlight` | an apply is already waiting or switching; wait for it |
+| **400** | the commit is not a full 40-hex sha — not a tag, not a short one |
+| **403** | wrong key |
+
+Neither a 400 nor a 403 starts anything.
 
 ---
 
@@ -356,11 +402,14 @@ attestation. It builds:
 - a hosted zone, since a transferred domain does not bring its old one, and
   points the registrar at it
 - a null MX (RFC 7505), which kills the account's email address
-- a certificate covering all three public names
+- two certificates: one covering the three enclave names, one for the domain
+  itself
 - `dashboard.{domain}`, served from `setup/assets/dashboard/` — static files,
   nothing to build
 - `proof.{domain}`, serving the signed statement and its bundle
 - `apply.{domain}`, the interface above
+- the front door: a load balancer at `{domain}` that every applied version
+  sits behind, answering 503 until the first is switched in
 
 It then checks the published statement against its bundle, deletes the starter
 user — after which nothing inside the account can rewrite the proof — and
@@ -373,17 +422,26 @@ distributions are created together and deploy in parallel rather than in turn.
 ### Where the boundary stops an applied commit
 
 An apply instance can build whatever the application needs — its own API Gateway
-APIs, Step Functions workflows, CloudFront distributions, and records anywhere in
-the domain including the apex.
+APIs, Step Functions workflows, CloudFront distributions, load balancers, and
+records anywhere in the domain, the apex included apart from its address.
 
 What it cannot touch is the enclave itself: the `enclavize-*` identities, the
 sign-in lock, the domain registration, the proof and dashboard buckets,
-enclavize's own API, custom domain, state machine and two distributions, the
-`dashboard.`, `proof.` and `apply.` records, and the apex MX, NS and SOA.
+enclavize's own API, custom domain, two state machines and two distributions,
+the `dashboard.`, `proof.` and `apply.` records, and the apex MX, NS, SOA, A
+and AAAA.
+
+Nor the switch: the front door and every target group behind it, the timer
+that starts a delayed switch, and anything EC2 wearing the enclave's name — the
+instances a switch is between, and the two security groups that decide who
+reaches them — which it can neither alter nor rename. It can read the
+enclave's parameters and not write them.
 
 That last set matters as much as the rest: taking `apply.{domain}` would let an
 application answer in the enclave's place and read the API key out of the header
-of every request meant for the real endpoint.
+of every request meant for the real endpoint; taking the apex, or the balancer,
+would let it serve around the switch that only moves traffic to a version once
+that version is healthy.
 
 ### The dashboard
 
@@ -397,6 +455,10 @@ Every apply is what rebuilds it: the state machine writes a record, then derives
 the index from a listing — one shard per month, plus a manifest naming the
 months. Deriving rather than appending is what makes it self-healing; a shard
 written badly is replaced wholesale by the next apply in that month.
+
+The record itself is rewritten as the switch goes — `scheduled`, `switching`,
+`live`, `retired` or `failed` — and the page reads each one for the month on
+show, which is how it says what is serving and what is coming.
 
 ## Layout
 
@@ -429,7 +491,7 @@ ENCLAVIZE_AWS_TEST=1 ENCLAVIZE_TEST_ACCOUNTS=111122223333 \
 ```
 
 **These cover only what can clean up after itself** — `iam`, `ec2`, `s3`, `ssm`,
-`events`, `dns`, `sfn`, `apigw`, `sts`. Every resource is named with a per-run
+`events`, `dns`, `sfn`, `apigw`, `sts`, `elbv2`. Every resource is named with a per-run
 prefix and deleted by it, so they are safe to run against any scratch account
 and safe to run twice. Anything a crashed run leaves behind is removed with:
 
@@ -502,8 +564,9 @@ python scripts/cleanup.py
 
 It needs nothing but those credentials. The domain is read from the account, and
 it names the account and makes you type the id back before removing anything. It
-removes what enclavize built and lists what it did not: an application's own
-resources are its own teardown's business.
+removes what enclavize built — every applied version behind the front door
+included — and lists what it did not: an application's own resources are its
+own teardown's business.
 
 Without such a credential none of this is available, and the account cannot be
 recovered. Run the workflow again on a fresh one.

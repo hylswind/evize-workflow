@@ -103,17 +103,26 @@ def run(*, domain: str, app_repo: str, api_key: str, region: str, res=None, log=
     # Requested before the delegation on purpose. The request needs nothing;
     # only validation needs the delegation, and ACM re-checks periodically — so
     # publishing the records now means it can pass the moment delegation lands.
+    #
+    # Two certificates: the enclave's three names on one, and the apex — where
+    # the application answers, through the front door — on its own. They
+    # validate side by side, so the second costs no waiting.
     certificate_arn = acm.request_certificate(
         acm_client, domain=dashboard_host, alternative_names=[proof_host, apply_host],
         idempotency_token=uuid.uuid4().hex[:32],
     )
-    records = acm.validation_records(acm_client, certificate_arn)
+    app_certificate_arn = acm.request_certificate(
+        acm_client, domain=domain, alternative_names=[],
+        idempotency_token=uuid.uuid4().hex[:32],
+    )
+    records = acm.validation_records(acm_client, certificate_arn) + \
+        acm.validation_records(acm_client, app_certificate_arn)
     dns.change_records(
         r53, zone_id=zone_id,
         changes=[dns.upsert(r["Name"], r["Type"], [r["Value"]]) for r in records],
         comment="enclavize certificate validation",
     )
-    log("certificate requested and validation records published")
+    log("certificates requested and validation records published")
 
     # --- hand the domain over, then work while the certificate validates ----
 
@@ -124,17 +133,21 @@ def run(*, domain: str, app_repo: str, api_key: str, region: str, res=None, log=
     log("registrar now points at this account's nameservers")
 
     # None of this needs the certificate — only the account and the bucket
-    # names — so it fills the wait instead of following it.
+    # names — so it fills the wait instead of following it. The load balancer
+    # too: it takes minutes to come up, and only its HTTPS listener needs the
+    # certificate.
     roles = apply.create_roles(
         iam_client, res=res, account_id=account_id, region=region,
         proof_bucket=proof_bucket, dashboard_bucket=dashboard_bucket,
         domain=domain, hosted_zone_id=zone_id,
     )
+    front_door = apply.create_front_door(session.client("ec2"), session.client("elbv2"), res=res)
+    log(f"front door {front_door['dns_name']} provisioning")
     state_machine_arn = apply.create_state_machine(
-        session.client("stepfunctions"), session.client("ec2"), session.client("ssm"),
-        res=res, app_repo=app_repo, region=region, domain=domain,
-        dashboard_bucket=dashboard_bucket, role_arn=roles["sfn_role_arn"],
-        ami_param=config.AMI_PARAM, instance_type=config.APPLY_INSTANCE_TYPE,
+        session.client("stepfunctions"),
+        res=res, region=region, account_id=account_id, dashboard_bucket=dashboard_bucket,
+        role_arn=roles["sfn_role_arn"], scheduler_role_arn=roles["scheduler_role_arn"],
+        delay_seconds=config.SWITCH_DELAY_SECONDS,
     )
     _, api_id = apply.create_api(
         session.client("apigateway"), iam_client, res=res, region=region, api_key=api_key,
@@ -143,13 +156,14 @@ def run(*, domain: str, app_repo: str, api_key: str, region: str, res=None, log=
     dashboard.mark(s3_client, bucket=dashboard_bucket, domain=domain, app_repo=app_repo,
                    state="apply-ready")
 
-    log("waiting for the certificate; this is the longest wait in the bring-up")
-    acm.await_issued(acm_client, certificate_arn,
-                     poll_max=config.CERT_VALIDATION_POLL_MAX_SECONDS,
-                     interval=config.CERT_VALIDATION_POLL_INTERVAL)
-    log("certificate issued")
+    log("waiting for the certificates; this is the longest wait in the bring-up")
+    for arn in (certificate_arn, app_certificate_arn):
+        acm.await_issued(acm_client, arn,
+                         poll_max=config.CERT_VALIDATION_POLL_MAX_SECONDS,
+                         interval=config.CERT_VALIDATION_POLL_INTERVAL)
+    log("certificates issued")
 
-    # --- everything the certificate was blocking ---------------------------
+    # --- everything the certificates were blocking -------------------------
 
     # Regional, so there is no distribution to propagate and this is immediate.
     url = apply.attach_custom_domain(
@@ -157,6 +171,24 @@ def run(*, domain: str, app_repo: str, api_key: str, region: str, res=None, log=
         certificate_arn=certificate_arn, zone_id=zone_id, region=region,
     )
     log(f"apply endpoint at {url}")
+
+    # The front door gets its listener and the apex, and only then can the
+    # switch be built — it carries the listener's ARN.
+    door = apply.attach_front_door(
+        session.client("elbv2"), r53, res=res, front_door=front_door,
+        certificate_arn=app_certificate_arn, domain=domain, zone_id=zone_id,
+        poll_max=config.LB_ACTIVE_POLL_MAX_SECONDS, interval=config.LB_ACTIVE_POLL_INTERVAL,
+    )
+    if not door["active"]:
+        log("WARNING: the front door has not finished provisioning")
+    apply.create_switch_machine(
+        session.client("stepfunctions"), session.client("ec2"), session.client("ssm"),
+        res=res, app_repo=app_repo, region=region, domain=domain,
+        dashboard_bucket=dashboard_bucket, role_arn=roles["sfn_role_arn"],
+        ami_param=config.AMI_PARAM, instance_type=config.APPLY_INSTANCE_TYPE,
+        front_door=front_door, listener_arn=door["listener_arn"],
+    )
+    log(f"https://{domain} answers through the front door; applies switch behind it")
 
     distributions = {
         "dashboard": dashboard.attach_cdn(

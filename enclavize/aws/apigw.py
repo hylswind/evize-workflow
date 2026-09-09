@@ -97,20 +97,32 @@ def put_state_machine_integration(apigw, *, api_id: str, resource_id: str, http_
         requestTemplates={"application/json": template},
         passthroughBehavior="NEVER",
     )
-    apigw.put_method_response(
-        restApiId=api_id, resourceId=resource_id, httpMethod=http_method, statusCode="200",
-        responseModels={"application/json": "Empty"},
-    )
+    # The template below overrides the status, but every status it can pick
+    # has to be declared on the method for the override to be honoured.
+    for status_code in ("200", str(IN_FLIGHT_STATUS), str(FAILED_STATUS)):
+        apigw.put_method_response(
+            restApiId=api_id, resourceId=resource_id, httpMethod=http_method,
+            statusCode=status_code, responseModels={"application/json": "Empty"},
+        )
     apigw.put_integration_response(
         restApiId=api_id, resourceId=resource_id, httpMethod=http_method, statusCode="200",
         responseTemplates={"application/json": STATE_MACHINE_RESPONSE},
     )
 
 
+IN_FLIGHT_ERROR = "ApplyInFlight"
+IN_FLIGHT_STATUS = 409
+FAILED_STATUS = 500
+
 STATE_MACHINE_RESPONSE = (
     "#if($input.path('$.status') == 'SUCCEEDED')"
     "$input.path('$.output')"
     "#else"
+    f"#if($input.path('$.error') == '{IN_FLIGHT_ERROR}')"
+    f"#set($context.responseOverride.status = {IN_FLIGHT_STATUS})"
+    "#else"
+    f"#set($context.responseOverride.status = {FAILED_STATUS})"
+    "#end"
     '{"status":"$input.path(\'$.status\')",'
     '"error":"$input.path(\'$.error\')",'
     '"cause":"$input.path(\'$.cause\')"}'
@@ -122,8 +134,10 @@ The state machine's own answer, not the envelope StartSyncExecution wraps it
 in — which carries billing figures, an execution ARN and internal type names,
 and buries the useful part in a JSON string that has to be parsed twice.
 
-A failure still has to say so: an HTTP 200 here means only that the service ran
-the workflow, so anything other than SUCCEEDED returns the reason instead.
+A failure still has to say so, and in the status code: StartSyncExecution
+answers 200 whether or not the workflow succeeded, so the code is overridden
+here — 409 when the workflow refused the apply because one is already in
+flight, 500 for anything else that failed.
 """
 
 
