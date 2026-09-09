@@ -92,10 +92,15 @@ def create_anchor_vpc(ec2, *, cidr: str, tag: str) -> str:
     ever originate from it — it has no instances, no gateway, no way in. A fresh
     one is created every time: reusing a tagged VPC would silently accept an
     account someone had already sealed.
+
+    Tagged in the same call that creates it. A second call to tag it can find
+    the VPC not there yet — EC2 answers CreateVpc before every endpoint knows
+    the id — and an untagged VPC is one no teardown can find.
     """
-    vpc_id = ec2.create_vpc(CidrBlock=cidr)["Vpc"]["VpcId"]
-    ec2.create_tags(Resources=[vpc_id], Tags=[{"Key": "Name", "Value": tag}])
-    return vpc_id
+    return ec2.create_vpc(
+        CidrBlock=cidr,
+        TagSpecifications=[{"ResourceType": "vpc", "Tags": [{"Key": "Name", "Value": tag}]}],
+    )["Vpc"]["VpcId"]
 
 
 def delete_vpc(ec2, vpc_id: str) -> None:
