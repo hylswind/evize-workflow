@@ -140,13 +140,18 @@ jobs:
         # waits for it and warns rather than failing if it never appears.
         run: python -u -m workflow.publish_proof "${{ steps.attest.outputs.bundle-path }}"
 
+      # Three days: long enough to collect, short enough that the console
+      # password does not sit in GitHub's storage for a quarter. The statement
+      # outlives this at proof.{domain}, published by the account itself.
       - uses: actions/upload-artifact@v4
         with:
           name: enclavize-statement
           path: statement.json
+          retention-days: 3
 
       - uses: actions/upload-artifact@v4
         if: always() && hashFiles('console.7z') != ''
         with:
           name: enclavize-console
           path: console.7z
+          retention-days: 3
