@@ -162,12 +162,16 @@ gh run list --repo "$CALLER" --workflow "$WORKFLOW" --limit 1  # gh does not ret
 gh run watch <run-id> --repo "$CALLER"
 ```
 
-It leaves two artifacts:
+It leaves two artifacts, kept for three days:
 
 ```sh
 gh run download <run-id> --repo "$CALLER" -n enclavize-statement
 gh run download <run-id> --repo "$CALLER" -n enclavize-console
 ```
+
+Three days is for collecting them, not keeping them. The statement lives on at
+`proof.{domain}`, published by the account itself; the console archive holds a
+password, and has no business sitting in GitHub's storage for a quarter.
 
 ### `statement.json` — what was sealed
 
