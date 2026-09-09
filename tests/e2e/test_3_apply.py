@@ -203,7 +203,7 @@ def test_the_dashboard_can_reach_that_record_with_no_credentials(serving, applie
         code, body = fetch(f"https://{host}/{naming.APPLIES_MANIFEST_KEY}")
         if code != 200:
             return None
-        months = [entry["Key"] for entry in json.loads(body).get("months", [])]
+        months = json.loads(body).get("months", [])
         if not months:
             return None
         # This apply happened moments ago, so its month is the newest there is.
@@ -211,12 +211,14 @@ def test_the_dashboard_can_reach_that_record_with_no_credentials(serving, applie
         if code != 200:
             return None
         shard = json.loads(body)
-        keys = [entry["Key"] for entry in shard.get("applies", [])]
-        return shard if serving["recordKey"] in keys else None
+        return shard if serving["recordKey"] in shard.get("applies", []) else None
 
     shard = poll(indexed, timeout=180, interval=10,
                  what=f"https://{host}/{naming.APPLIES_MANIFEST_KEY} to index this apply")
-    assert not shard.get("truncated"), f"{shard['month']} was listed only in part"
+    assert shard.get("truncated") is False, f"{shard['month']} was listed only in part"
+    # Keys and nothing else: the page is public, and a listing's ETags and
+    # storage classes are noise to anyone reading it.
+    assert all(isinstance(key, str) for key in shard["applies"]), shard["applies"]
     code, body = fetch(f"https://{host}/{serving['recordKey']}")
     assert code == 200
     assert json.loads(body)["status"] == "live"

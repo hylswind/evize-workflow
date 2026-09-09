@@ -35,11 +35,35 @@ work that is going ahead regardless — the worst of both answers. The ResultPat
 is what keeps the decision's own output alive for Done to answer with.
 """
 
+_KEEP_GOING_JSONATA = [
+    {
+        "ErrorEquals": ["States.ALL"],
+        "Output": "{% $merge([$states.input, {'indexError': $states.errorOutput}]) %}",
+        "Next": "Done",
+    }
+]
+"""The same rule for a JSONata state, which has no ResultPath: the input is
+carried through by hand, with the error beside it."""
+
+
+def _keys_of(listing: str) -> str:
+    """The keys of an S3 listing, as an array, whatever the listing holds.
+
+    The brackets are what make it an array every time. JSONata unwraps a path
+    that yields one value — a month with a single apply would come out as a
+    bare string, not a one-element list — and a listing with nothing in it has
+    no Contents at all, which the path turns into nothing and the brackets turn
+    into an empty array. Without them the first apply of a month would break
+    the page that reads it.
+    """
+    return f"{{% [{listing}.Contents.Key] %}}"
+
+
 def _when_to_switch(delay_seconds: int) -> str:
-    """The one JSONata expression in the definition.
+    """The JSONata that adds the delay to the receipt time.
 
     JSONPath's intrinsics cannot add to a timestamp, and a one-time schedule
-    needs one: `at(yyyy-mm-ddThh:mm:ss)`, evaluated in UTC. So this one state
+    needs one: `at(yyyy-mm-ddThh:mm:ss)`, evaluated in UTC. So this state
     speaks JSONata, and hands everything the delayed branch needs back as plain
     values — the ISO switch time, the schedule expression, and the two JSON
     strings that Parameter Store and the schedule's target want.
@@ -265,28 +289,32 @@ def build_definition(
                 "Catch": _KEEP_GOING,
                 "Next": "WriteMonthIndex",
             },
+            # The two index writers speak JSONata: a listing comes back as
+            # objects full of ETags and storage classes, and the page wants
+            # only the keys. JSONPath has no way to pick one field out of each
+            # item; JSONata does it in a path. Square brackets around the path
+            # are load-bearing — see _keys_of.
             "WriteMonthIndex": {
                 "Type": "Task",
+                "QueryLanguage": "JSONata",
                 "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
-                "Parameters": {
+                "Arguments": {
                     "Bucket": dashboard_bucket,
-                    "Key.$": (
-                        f"States.Format('{naming.APPLIES_INDEX_PREFIX}{{}}.json', $.month.name)"
-                    ),
+                    "Key": f"{{% '{naming.APPLIES_INDEX_PREFIX}' & $states.input.month.name & '.json' %}}",
                     "ContentType": "application/json",
                     "CacheControl": naming.CHANGES_CACHE_CONTROL,
                     "Body": {
-                        "month.$": "$.month.name",
-                        "generatedAt.$": "$.at",
+                        "month": "{% $states.input.month.name %}",
+                        "generatedAt": "{% $states.input.at %}",
                         # A listing caps at a thousand keys and this makes no
                         # second call, so a month busier than that is carried
                         # through as truncated rather than quietly shortened.
-                        "truncated.$": "$.page.IsTruncated",
-                        "applies.$": "$.page.Contents",
+                        "truncated": "{% $states.input.page.IsTruncated ? true : false %}",
+                        "applies": _keys_of("$states.input.page"),
                     },
                 },
-                "ResultPath": None,
-                "Catch": _KEEP_GOING,
+                "Output": "{% $states.input %}",
+                "Catch": _KEEP_GOING_JSONATA,
                 "Next": "ListMonths",
             },
             "ListMonths": {
@@ -302,19 +330,20 @@ def build_definition(
             },
             "WriteManifest": {
                 "Type": "Task",
+                "QueryLanguage": "JSONata",
                 "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
-                "Parameters": {
+                "Arguments": {
                     "Bucket": dashboard_bucket,
                     "Key": naming.APPLIES_MANIFEST_KEY,
                     "ContentType": "application/json",
                     "CacheControl": naming.CHANGES_CACHE_CONTROL,
                     "Body": {
-                        "generatedAt.$": "$.at",
-                        "months.$": "$.months.Contents",
+                        "generatedAt": "{% $states.input.at %}",
+                        "months": _keys_of("$states.input.months"),
                     },
                 },
-                "ResultPath": None,
-                "Catch": _KEEP_GOING,
+                "Output": "{% $states.input %}",
+                "Catch": _KEEP_GOING_JSONATA,
                 "Next": "Done",
             },
             "Done": {

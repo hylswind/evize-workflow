@@ -7,8 +7,8 @@
 // Four kinds of file, all written by the account itself:
 //
 //   status.json                  domain, bound repo, where the bring-up got to
-//   applies.json                 which months hold applies
-//   applies/index/{YYYY-MM}.json one month's applies, as S3 listed them
+//   applies.json                 which months hold applies, by shard key
+//   applies/index/{YYYY-MM}.json one month's applies, by record key
 //   applies/{at}_{commit}.json   one apply: what became of it
 //
 // The month shards are what keep the whole history reachable without ever
@@ -193,7 +193,7 @@ function openNextMonth() {
   return read(`./${month.key}`).then(
     (shard) => {
       const listed = (shard.applies || [])
-        .map((entry) => parseRecord(entry.Key))
+        .map(parseRecord)
         .filter(Boolean)
         .sort((a, b) => (a.at < b.at ? 1 : -1));
       return withOutcomes(listed).then((records) => {
@@ -226,7 +226,7 @@ function openNextMonth() {
 
 function showLog(manifest) {
   view.months = (manifest.months || [])
-    .map((entry) => ({ key: entry.Key, month: parseMonth(entry.Key) }))
+    .map((key) => ({ key, month: parseMonth(key) }))
     // Newest first: the month a person wants is the one that just happened.
     .sort((a, b) => (a.month < b.month ? 1 : -1));
 

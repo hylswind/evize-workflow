@@ -128,9 +128,12 @@ def test_the_switch_time_is_the_receipt_plus_the_delay():
     assert f"+ {3600 * 1000}" in definition(delay=3600)["States"]["WhenToSwitch"]["Output"]
 
 
-def test_jsonata_is_confined_to_that_one_state():
+def test_jsonata_is_confined_to_the_states_that_need_it():
+    """Three: the one that adds to a timestamp, and the two that pick keys out
+    of a listing. Everything else stays JSONPath, so the definition is not
+    two dialects for no reason."""
     speaking = [name for name, s in states().items() if s.get("QueryLanguage") == "JSONata"]
-    assert speaking == ["WhenToSwitch"]
+    assert speaking == ["WhenToSwitch", "WriteMonthIndex", "WriteManifest"]
     assert "QueryLanguage" not in definition()
 
 
@@ -246,23 +249,49 @@ def test_a_months_listing_cannot_pick_up_a_shard():
     )
 
 
-def test_the_manifest_names_the_months_and_nothing_else():
-    assert states()["ListMonths"]["Parameters"]["Prefix"] == naming.APPLIES_INDEX_PREFIX
-    manifest = states()["WriteManifest"]["Parameters"]
+def test_the_index_holds_keys_and_nothing_else():
+    """A listing comes back as objects full of ETags and storage classes, and
+    the page wants only the keys — which is what these are public for.
+
+    The brackets are the point of the assertion. JSONata unwraps a path that
+    yields one value, so a month with a single apply would otherwise arrive as
+    a bare string; and a listing with nothing in it has no Contents, which the
+    brackets turn into an empty array rather than an error. Neither case is
+    something an offline test can execute, so the shape is pinned here and
+    the first apply of every cycle proves it."""
+    month = states()["WriteMonthIndex"]["Arguments"]["Body"]
+    assert month["applies"] == "{% [$states.input.page.Contents.Key] %}"
+    assert month["month"] == "{% $states.input.month.name %}"
+    manifest = states()["WriteManifest"]["Arguments"]
     assert manifest["Key"] == naming.APPLIES_MANIFEST_KEY
-    assert manifest["Body"]["months.$"] == "$.months.Contents"
+    assert manifest["Body"]["months"] == "{% [$states.input.months.Contents.Key] %}"
+    assert states()["ListMonths"]["Parameters"]["Prefix"] == naming.APPLIES_INDEX_PREFIX
+
+
+def test_the_index_writers_pass_the_decision_through():
+    """A JSONata state's Output replaces the state's output outright, so what
+    Done needs — the commit and the outcome — has to be carried by hand."""
+    for name in ("WriteMonthIndex", "WriteManifest"):
+        assert states()[name]["Output"] == "{% $states.input %}"
+
+
+def test_the_month_index_key_is_the_helper_key():
+    key = states()["WriteMonthIndex"]["Arguments"]["Key"]
+    assert key == f"{{% '{naming.APPLIES_INDEX_PREFIX}' & $states.input.month.name & '.json' %}}"
+    assert naming.apply_month_key("2026-09") == f"{naming.APPLIES_INDEX_PREFIX}2026-09.json"
 
 
 def test_a_month_too_busy_to_list_says_so():
     """One listing caps at a thousand keys and this makes no second call, so the
-    alternative to saying so is quietly showing part of a month."""
-    body = states()["WriteMonthIndex"]["Parameters"]["Body"]
-    assert body["truncated.$"] == "$.page.IsTruncated"
+    alternative to saying so is quietly showing part of a month. Guarded, so a
+    listing without the field reads as not truncated rather than as an error."""
+    body = states()["WriteMonthIndex"]["Arguments"]["Body"]
+    assert body["truncated"] == "{% $states.input.page.IsTruncated ? true : false %}"
 
 
 def test_what_the_dashboard_rereads_is_not_cached_like_the_rest():
     for name in ("WriteMonthIndex", "WriteManifest"):
-        assert states()[name]["Parameters"]["CacheControl"] == naming.CHANGES_CACHE_CONTROL
+        assert states()[name]["Arguments"]["CacheControl"] == naming.CHANGES_CACHE_CONTROL
 
 
 def test_no_bookkeeping_failure_can_report_a_failed_apply():
@@ -282,8 +311,12 @@ def test_no_bookkeeping_failure_can_report_a_failed_apply():
         catch = states()[name]["Catch"][0]
         assert catch["Next"] == "Done"
         # Without this the error replaces the input, and Done answers with
-        # nothing.
-        assert catch["ResultPath"] == "$.indexError"
+        # nothing. A JSONata state has no ResultPath and carries the input
+        # through by hand instead.
+        if states()[name].get("QueryLanguage") == "JSONata":
+            assert catch["Output"] == "{% $merge([$states.input, {'indexError': $states.errorOutput}]) %}"
+        else:
+            assert catch["ResultPath"] == "$.indexError"
 
 
 # --- the answer ------------------------------------------------------------
