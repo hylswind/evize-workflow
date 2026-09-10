@@ -13,7 +13,9 @@ from enclavize.logic.naming import (  # re-exported: the cross-phase contract
     APPLIES_PREFIX,
     CHANGES_CACHE_CONTROL,
     apply_host,
+    apply_param_name,
     dashboard_bucket_name,
+    go_flag_param,
     dashboard_host,
     proof_bucket_name,
     proof_host,
@@ -58,6 +60,15 @@ COMMIT_PATTERN = "^[0-9a-f]{40}$"
 AMI_PARAM = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
 APPLY_INSTANCE_TYPE = "t3.large"
 
+# The handshake before a version is replaced. While one is serving, an apply
+# first runs the serving commit again on a preparing instance, in UPDATE mode,
+# and only launches the new commit once that instance has said it is ready —
+# or once this long has passed without a word. A timer looks every so often.
+# Both are baked into the account at bring-up, so a change here takes effect on
+# the next account sealed, not on one already running.
+PREPARE_CHECK_INTERVAL_MINUTES = 5
+PREPARE_TIMEOUT_SECONDS = 7 * 24 * 3600
+
 
 @dataclass(frozen=True)
 class Resources:
@@ -68,8 +79,14 @@ class Resources:
     apply_boundary: str = "enclavize-apply-boundary"
     apply_sfn_role: str = "enclavize-apply-sfn"
     apply_api_role: str = "enclavize-apply-api"
+    apply_scheduler_role: str = "enclavize-apply-scheduler"
     apply_state_machine: str = "enclavize-apply"
+    apply_check_state_machine: str = "enclavize-apply-check"
+    apply_check_schedule: str = "enclavize-apply-check"
     apply_api_name: str = "enclavize-apply-api"
+    apply_current_param: str = "/enclavize/apply/current"
+    apply_pending_param: str = "/enclavize/apply/pending"
+    apply_ready_param: str = "/enclavize/apply/ready"
 
     def with_prefix(self, prefix: str) -> "Resources":
         renamed = {}
@@ -80,16 +97,32 @@ class Resources:
             "apply_boundary",
             "apply_sfn_role",
             "apply_api_role",
+            "apply_scheduler_role",
             "apply_state_machine",
+            "apply_check_state_machine",
+            "apply_check_schedule",
             "apply_api_name",
         ):
             current = getattr(self, field_name)
             renamed[field_name] = prefix + current[len(self.prefix):] if current.startswith(self.prefix) else prefix + current
         renamed["prefix"] = prefix
+        for which in ("current", "pending", "ready"):
+            renamed[f"apply_{which}_param"] = apply_param_name(prefix, which)
         return replace(self, **renamed)
 
     def apply_boundary_arn(self, account_id: str) -> str:
         return f"arn:aws:iam::{account_id}:policy/{self.apply_boundary}"
+
+    def go_param(self) -> str:
+        """The workflow's starting gun, which lives under the same path. Named
+        here so the boundary can keep applications away from it."""
+        return go_flag_param(self.prefix)
+
+    def enclave_params(self) -> list:
+        """The parameters an application may neither read nor write: the go
+        flag and the two that say what is serving and what is coming. The
+        ready flag is absent on purpose — it is the one an application writes."""
+        return [self.go_param(), self.apply_current_param, self.apply_pending_param]
 
 
 RESOURCES = Resources()

@@ -106,3 +106,32 @@ def apply_host(domain: str) -> str:
     can look it up. This name is derivable from the domain alone.
     """
     return f"apply.{domain}"
+
+
+COMMIT_TAG = "enclavize:commit"
+"""On every instance the apply machinery launches: the commit it checked out."""
+
+PREPARING_FOR_TAG = "enclavize:preparing-for"
+"""On a preparing instance only: the commit it is preparing the way for. It is
+how the check machine finds a preparer that never said ready, to stop it before
+the new commit goes in."""
+
+
+def go_flag_param(prefix: str) -> str:
+    """The parameter the workflow fires to start the bring-up: `/enclavize/go-flag`.
+
+    Named here because both phases have to agree on it, and the apply boundary
+    has to name it to keep applications away from it.
+    """
+    return f"/{prefix.strip('-')}/go-flag"
+
+
+def apply_param_name(prefix: str, which: str) -> str:
+    """The parameters the apply machinery keeps: `/enclavize/apply/current`,
+    `/enclavize/apply/pending` and `/enclavize/apply/ready`.
+
+    The first two are the enclave's own bookkeeping — what is serving, what is
+    coming — and an application cannot touch them. `ready` is the one it
+    writes: the word from a preparing instance that the switch may go ahead.
+    """
+    return f"/{prefix.strip('-')}/apply/{which}"

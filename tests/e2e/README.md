@@ -17,6 +17,8 @@ sealed for real:
   catch, none of which a definition being valid says anything about
 - the run creating an organization to read its own root email and removing it
   again, which is the only way to find out what AWS really emits in answer
+- the handover: the serving commit run again to prepare, its word read by a
+  timer, and the new commit launched on it — waited out for real
 
 **Not proven here: the event-history audit.** Every run in this suite passes
 `bypass_event_check=true`, because it keeps a way back into the account and the
@@ -45,7 +47,8 @@ Checked by `preflight.py` before anything is dispatched:
 
 **One thing: an executable `setup.sh` at the repository root.** That is all
 enclavize requires, and the core of stage 3 checks no more than that — post a
-commit, an instance runs that script.
+commit, an instance runs that script; post another while it serves, the script
+runs again in `UPDATE` mode, and once it says ready the new commit runs.
 
 Three optional additions let the suite check more, and each is skipped when the
 profile omits it:
@@ -123,12 +126,16 @@ export AWS_PROFILE=...                              # root, or your admin IAM us
 python tests/e2e/preflight.py                   # read-only; fix what it reports
 pytest -m e2e tests/e2e/test_1_seal.py          # ~25–50 min
 pytest -m e2e tests/e2e/test_2_bringup.py       # ~40–75 min
-pytest -m e2e tests/e2e/test_3_apply.py         # ~5–15 min
+pytest -m e2e tests/e2e/test_3_apply.py         # ~15–25 min
 python tests/e2e/unseal.py                      # ~25 min, mostly CloudFront
 ```
 
-About two and a half hours end to end. The three stages run separately on
-purpose: stages 2 and 3 assert against a live account rather than against stage
+About two and a half hours end to end. Stage 3 applies three times: the first
+launches at once, the second launches a preparer for the serving version and
+is told what is coming, the third is refused — then it waits for the preparer
+to say ready and shut down, and for the timer's next look to launch the second
+version. Nothing about the timer is simulated. The three stages run separately
+on purpose: stages 2 and 3 assert against a live account rather than against stage
 1's memory, so either can be re-run alone while iterating.
 
 `ENCLAVIZE_E2E_RUN_ID=<id>` makes stage 1 attach to a run that already happened

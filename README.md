@@ -242,19 +242,68 @@ so however long the account runs, all of its history stays reachable.
 
 ## 8. Applying a commit
 
-An apply runs one commit's `setup.sh` inside the account. What that script does
-is its own business: ship a new version of the application, rearrange the
-account's resources, or both.
+An apply runs one commit's `setup.sh` on a fresh instance inside the account.
+What that script does is its own business: ship a new version of the
+application, rearrange the account's resources, or both. Retiring the version
+before it is its business too — enclavize launches one instance per apply and
+hands it over, and never stops one on its own.
 
 ### What the application repo must look like
 
 **One thing: an executable `setup.sh` at the repository root.** That is the
 whole interface. An instance clones the repo at the commit you name, checks it
-out, and runs that script as root with `ENCLAVIZE_DOMAIN` set — the domain this
-account holds, and where the application builds its own names.
+out, and runs that script as root with this in its environment:
+
+| variable | when | what |
+|---|---|---|
+| `ENCLAVIZE_DOMAIN` | always | the domain this account holds, and where the application builds its own names |
+| `ENCLAVIZE_MODE` | always | `NEW` or `UPDATE`, below |
+| `ENCLAVIZE_NEXT_COMMIT` | `UPDATE` only | the commit that is about to replace this one |
 
 It runs with `AdministratorAccess`, capped by a permission boundary — so it can
 build whatever the application needs and still cannot touch the enclave.
+
+### The two modes
+
+**`NEW`: this instance is the version that will serve.** Do whatever the
+application does. The first commit applied after a bring-up runs this way at
+once, and so does every commit switched to later.
+
+**`UPDATE`: this instance is the version serving *now*, run once more to
+prepare for the one coming.** When something is already serving, an apply does
+not launch the new commit straight away. It launches the serving commit again,
+on a fresh instance, in this mode — so the application can warn its users,
+drain, move data, or whatever a handover needs, with the incoming commit named
+in `ENCLAVIZE_NEXT_COMMIT`. When it is done, it says so and shuts down:
+
+```sh
+aws ssm put-parameter --name /enclavize/apply/ready \
+  --value "$ENCLAVIZE_NEXT_COMMIT" --type String --overwrite
+shutdown -h now
+```
+
+The value is the commit it was told about, not a bare "ok": the word counts
+only when it names the commit that is waiting, so a preparer that speaks late —
+after its apply was superseded — cannot let a later commit through early. The
+instance is launched to terminate on shutdown, so nothing is left behind.
+
+Within `PREPARE_CHECK_INTERVAL_MINUTES` of the word (`setup/config.py`, five
+minutes), the new commit is launched in `NEW` mode and becomes what the account
+says is serving. The instance that was serving is not stopped for it; retiring
+it stays the application's job.
+
+The application can only say ready. There is no "do not switch": a preparer
+that never speaks is given `PREPARE_TIMEOUT_SECONDS` (seven days), and then the
+switch goes ahead regardless, with the preparer stopped first. Waiting is a
+courtesy to the serving version, not a veto. Both constants are baked into the
+account when it is sealed, so changing one changes the next account, not this
+one.
+
+Everything an application needs to know arrives in its environment. The other
+parameters under `/enclavize/` — the go flag, `apply/current` and
+`apply/pending` — are the enclave's own bookkeeping, and the boundary keeps an
+application away from them, reading included. `apply/ready` is the one it may
+touch.
 
 ### If it creates a role or a user
 
@@ -299,15 +348,25 @@ curl -X POST https://apply.{domain}/v1/commits \
 ```
 
 ```json
-{"commit": "b5cdb1ce…", "instanceId": "i-0abc…", "status": "launched"}
+{"commit": "b5cdb1ce…", "status": "launched", "instanceId": "i-0abc…", "startedAt": "…Z"}
+{"commit": "b5cdb1ce…", "status": "preparing", "previous": "9f3a04d1…", "preparerId": "i-0def…", "startedAt": "…Z"}
 ```
 
-`launched`, not `applied`: the instance has only just started. It answers
-immediately rather than waiting, because both the Express workflow behind it and
-API Gateway's integration time out well before a real `setup.sh` could finish.
+`launched` or `preparing`, never `applied`: the instance has only just started.
+It answers immediately rather than waiting, because both the Express workflow
+behind it and API Gateway's integration time out well before a real `setup.sh`
+could finish. The answer is the dashboard's record of the apply, as first
+written; the dashboard is where the rest is watched.
 
-The commit must be a full 40-hex sha — not a tag, not a short one. Anything else
-is refused with **400**, and a wrong key with **403**; neither starts anything.
+| answer | meaning |
+|---|---|
+| **200** `launched` | nothing was serving; the commit is running now |
+| **200** `preparing` | a version is serving; it has been launched again to prepare, and the commit follows once it says ready |
+| **409** `ApplyInFlight` | an apply is already preparing or switching; wait for it |
+| **400** | the commit is not a full 40-hex sha — not a tag, not a short one |
+| **403** | wrong key |
+
+Neither a 400 nor a 403 starts anything.
 
 ---
 
@@ -377,13 +436,17 @@ distributions are created together and deploy in parallel rather than in turn.
 ### Where the boundary stops an applied commit
 
 An apply instance can build whatever the application needs — its own API Gateway
-APIs, Step Functions workflows, CloudFront distributions, and records anywhere in
-the domain including the apex.
+APIs, Step Functions workflows, CloudFront distributions, schedules, and records
+anywhere in the domain including the apex.
 
 What it cannot touch is the enclave itself: the `enclavize-*` identities, the
 sign-in lock, the domain registration, the proof and dashboard buckets,
-enclavize's own API, custom domain, state machine and two distributions, the
-`dashboard.`, `proof.` and `apply.` records, and the apex MX, NS and SOA.
+enclavize's own API, custom domain, two state machines and two distributions,
+the `dashboard.`, `proof.` and `apply.` records, and the apex MX, NS and SOA.
+
+Nor the switch: the timer that has the check look for a preparer's word, and
+the parameters that say what is serving and what is coming — which it can
+neither write nor read. The ready flag is the one parameter left to it.
 
 That last set matters as much as the rest: taking `apply.{domain}` would let an
 application answer in the enclave's place and read the API key out of the header
@@ -401,6 +464,10 @@ Every apply is what rebuilds it: the state machine writes a record, then derives
 the index from a listing — one shard per month, plus a manifest naming the
 months. Deriving rather than appending is what makes it self-healing; a shard
 written badly is replaced wholesale by the next apply in that month.
+
+The record itself is rewritten as the switch goes — `launched`, `preparing`,
+`retired` or `failed` — and the page reads each one for the month on show,
+which is how it says what is serving and what is coming.
 
 ## Layout
 

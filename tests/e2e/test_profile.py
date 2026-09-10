@@ -27,6 +27,7 @@ transfer: real
 app:
   repo: acme/application
   ref: v2
+  nextRef: v3
   url: https://app.example.com
   resultsUrl: https://app.example.com/results.json
   teardown: teardown.sh
@@ -94,6 +95,7 @@ def test_a_full_profile_round_trips():
     assert profile.transfer == "real"
     assert profile.app.repo == "acme/application"
     assert profile.app.ref == "v2"
+    assert profile.app.next_ref == "v3"
     assert profile.app.results_url == "https://app.example.com/results.json"
     assert profile.app.teardown == "teardown.sh"
 
@@ -117,6 +119,7 @@ def test_a_minimal_profile_is_enough():
     assert profile.transfer == "bypass"
     assert profile.timeouts == DEFAULT_TIMEOUTS
     assert profile.app.url == ""
+    assert profile.app.next_ref == ""
     assert profile.app.results_url == ""
     assert profile.app.teardown == ""
 

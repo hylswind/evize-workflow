@@ -55,6 +55,24 @@ def test_the_state_machine_is_express_so_it_can_answer_synchronously():
     assert recorded["type"] == "EXPRESS"
 
 
+def test_the_check_machine_is_standard_because_its_runs_are_the_record():
+    """Each run is seconds, but a switch leaves no other trace of itself than
+    the run that did it — and Express keeps none."""
+    recorded = {}
+
+    class Recorder:
+        def create_state_machine(self, **kwargs):
+            recorded.update(kwargs)
+            return {"stateMachineArn": "arn:check"}
+
+    sfn.create_state_machine(
+        Recorder(), name="enclavize-apply-check",
+        definition={"StartAt": "Done", "States": {"Done": {"Type": "Succeed"}}},
+        role_arn="arn:aws:iam::123456789012:role/enclavize-apply-sfn", kind=sfn.STANDARD,
+    )
+    assert recorded["type"] == "STANDARD"
+
+
 def test_the_definition_round_trips(sfn_client):
     role = "arn:aws:iam::123456789012:role/enclavize-apply-sfn"
     definition = {"StartAt": "Done", "States": {"Done": {"Type": "Succeed"}}}
@@ -223,6 +241,39 @@ def test_a_failed_execution_still_says_so():
     assert "SUCCEEDED" in template
     for field in ("$.status", "$.error", "$.cause"):
         assert field in template, field
+
+
+def test_a_refused_apply_is_a_409_and_any_other_failure_a_500():
+    """StartSyncExecution answers 200 whether or not the workflow succeeded, so
+    the status is overridden in the template — and the two failures an operator
+    acts on differently get different codes."""
+    template = apigw.STATE_MACHINE_RESPONSE
+    refused = template.index(f"#if($input.path('$.error') == '{apigw.IN_FLIGHT_ERROR}')")
+    assert template.index("#set($context.responseOverride.status = 409)") > refused
+    assert template.index("#set($context.responseOverride.status = 500)") > refused
+    # Only on the failure branch: a success keeps its 200.
+    assert template.index("responseOverride") > template.index("$input.path('$.output')")
+
+
+def test_every_status_the_template_can_pick_is_declared_on_the_method():
+    # An override to an undeclared status is not honoured.
+    declared = []
+
+    class Recorder:
+        def put_integration(self, **kwargs):
+            pass
+
+        def put_method_response(self, **kwargs):
+            declared.append(kwargs["statusCode"])
+
+        def put_integration_response(self, **kwargs):
+            pass
+
+    apigw.put_state_machine_integration(
+        Recorder(), api_id="api1", resource_id="res1", http_method="POST", region=REGION,
+        credentials_arn="arn:aws:iam::1:role/api", state_machine_arn="arn:sm",
+    )
+    assert set(declared) == {"200", "409", "500"}
 
 
 def test_the_invoke_url_is_regional():

@@ -46,6 +46,50 @@ def service_trust(service: str) -> dict:
     }
 
 
+SCHEDULER_SERVICE = "scheduler.amazonaws.com"
+
+
+def scheduler_trust(*, account_id: str, region: str) -> dict:
+    """Assumable by EventBridge Scheduler, and only on this account's behalf.
+
+    Both conditions are the service's own guard against being used as a
+    confused deputy: without them a schedule in any account that named this
+    role's ARN could have it assumed. The source has to be the schedule group
+    rather than a schedule — Scheduler evaluates the condition against the
+    group, and a schedule-shaped ARN never matches.
+    """
+    return {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Principal": {"Service": SCHEDULER_SERVICE},
+                "Action": "sts:AssumeRole",
+                "Condition": {
+                    "StringEquals": {
+                        "aws:SourceAccount": account_id,
+                        "aws:SourceArn": f"arn:aws:scheduler:{region}:{account_id}:schedule-group/default",
+                    }
+                },
+            }
+        ],
+    }
+
+
+def apply_scheduler_role_policy(*, region: str, account_id: str, check_state_machine: str) -> dict:
+    """Start the check, and nothing else. What the timer fires."""
+    return {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Action": "states:StartExecution",
+                "Resource": f"arn:aws:states:{region}:{account_id}:stateMachine:{check_state_machine}",
+            }
+        ],
+    }
+
+
 def event_reader_policy() -> dict:
     """Read history, and list regions so the check can sweep all of them."""
     return {
@@ -122,9 +166,9 @@ def console_self_service_policy(*, account_id: str) -> dict:
     }
 
 
-def apply_machinery_denial(*, region: str, account_id: str, state_machine: str, domain: str,
-                           protected=None) -> dict:
-    """Keep applications off the enclave's own API, workflow and distributions.
+def apply_machinery_denial(*, region: str, account_id: str, state_machine: str,
+                           check_state_machine: str, domain: str, protected=None) -> dict:
+    """Keep applications off the enclave's own API, workflows and distributions.
 
     Named resources where they are known, and the whole service where they are
     not. The distinction matters: denying `apigateway:*` outright also stops the
@@ -148,12 +192,16 @@ def apply_machinery_denial(*, region: str, account_id: str, state_machine: str, 
 
     apply_host = naming.apply_host(domain)
     resources = [
-        # Both names are fixed, so these are known from the start — unlike the
-        # API's generated id. Taking the custom domain would let an application
-        # answer at apply.{domain} in the enclave's place, collecting the API
-        # key out of the header of every request meant for the real one.
+        # All of these names are fixed, so they are known from the start —
+        # unlike the API's generated id. Taking the custom domain would let an
+        # application answer at apply.{domain} in the enclave's place,
+        # collecting the API key out of the header of every request meant for
+        # the real one; taking either workflow would let it switch versions on
+        # its own terms, or stop a switch from ever happening.
         f"arn:aws:states:{region}:{account_id}:stateMachine:{state_machine}",
         f"arn:aws:states:{region}:{account_id}:execution:{state_machine}:*",
+        f"arn:aws:states:{region}:{account_id}:stateMachine:{check_state_machine}",
+        f"arn:aws:states:{region}:{account_id}:execution:{check_state_machine}:*",
         f"arn:aws:apigateway:{region}::/domainnames/{apply_host}",
         f"arn:aws:apigateway:{region}::/domainnames/{apply_host}/*",
     ]
@@ -183,6 +231,8 @@ def apply_boundary_policy(
     domain: str,
     hosted_zone_id: str,
     state_machine: str,
+    check_state_machine: str,
+    parameters: list,
     protected=None,
 ) -> dict:
     """The ceiling for everything an applied commit creates.
@@ -191,6 +241,12 @@ def apply_boundary_policy(
     but the enclave's own machinery is fenced off, and — critically — the
     boundary cannot be removed or swapped, so a principal the apply role creates
     can never exceed it.
+
+    `parameters` names the Parameter Store entries that are the enclave's own
+    bookkeeping — the go flag, what is serving, what is coming — which an
+    application has no business reading or writing. Listed one by one rather
+    than by path, because the path also holds the one parameter an application
+    *does* write, the ready flag, and a Deny admits no exception.
     """
     iam_arn = f"arn:aws:iam::{account_id}"
     boundary_arn = f"{iam_arn}:policy/{resource_prefix}apply-boundary"
@@ -300,9 +356,32 @@ def apply_boundary_policy(
                 region=region,
                 account_id=account_id,
                 state_machine=state_machine,
+                check_state_machine=check_state_machine,
                 domain=domain,
                 protected=protected,
             ),
+            {
+                # The timer that has the check look for a preparer's word.
+                # Deleting it would strand a pending apply; rewriting it would
+                # have the check look on the application's terms.
+                "Sid": "CannotTouchTheCheckTimer",
+                "Effect": "Deny",
+                "Action": "scheduler:*",
+                "Resource": f"arn:aws:scheduler:{region}:{account_id}:schedule/default/{resource_prefix}*",
+            },
+            {
+                # The account's word on what is serving and what is coming, and
+                # the workflow's starting gun. An application that could write
+                # them could tell the switch anything; one that could read them
+                # has no use for what it finds, since everything it needs to
+                # know arrives in its environment.
+                "Sid": "CannotTouchTheEnclavesBookkeeping",
+                "Effect": "Deny",
+                "Action": "ssm:*",
+                "Resource": [
+                    f"arn:aws:ssm:{region}:{account_id}:parameter{name}" for name in parameters
+                ],
+            },
             {
                 # The rule that makes the fence hold at any depth. It lives in
                 # the boundary rather than in the apply role's own policy so
@@ -370,8 +449,17 @@ def apply_role_policy(*, boundary_arn: str) -> dict:
     }
 
 
-def apply_state_machine_policy(*, dashboard_bucket: str) -> dict:
-    """Launch one instance, and keep the dashboard's record of having done so.
+def apply_state_machine_policy(*, region: str, account_id: str, dashboard_bucket: str,
+                               check_state_machine: str, schedule: str, scheduler_role: str,
+                               instance_name_tag: str, parameters: list) -> dict:
+    """What the two apply workflows may do, shared between them.
+
+    Receiving: look for a check in flight, read what is serving, launch, set
+    the timer. Checking: read the parameters, take the timer down, stop a
+    preparer that never spoke, launch, and keep the parameters and the
+    dashboard's record straight. The one power that could reach an
+    application's own instance — terminating — is held to instances wearing
+    the enclave's name, which every preparer does.
 
     The listing is the part worth explaining. The dashboard is a static page and
     cannot list a bucket, so the index it reads has to be written by whatever
@@ -379,6 +467,7 @@ def apply_state_machine_policy(*, dashboard_bucket: str) -> dict:
     appended to, which is what makes it heal itself rather than drift. Held to
     the one prefix it reads, so this is no view of the rest of the bucket.
     """
+    check_arn = f"arn:aws:states:{region}:{account_id}:stateMachine:{check_state_machine}"
     return {
         "Version": "2012-10-17",
         "Statement": [
@@ -386,6 +475,47 @@ def apply_state_machine_policy(*, dashboard_bucket: str) -> dict:
                 "Effect": "Allow",
                 "Action": ["ec2:RunInstances", "ec2:CreateTags", "ec2:DescribeInstances"],
                 "Resource": "*",
+            },
+            {
+                "Sid": "StopOnlyTheEnclavesOwn",
+                "Effect": "Allow",
+                "Action": "ec2:TerminateInstances",
+                "Resource": "*",
+                "Condition": {"StringEquals": {"aws:ResourceTag/Name": instance_name_tag}},
+            },
+            {
+                "Effect": "Allow",
+                "Action": ["ssm:GetParameter", "ssm:PutParameter", "ssm:DeleteParameter"],
+                "Resource": [
+                    f"arn:aws:ssm:{region}:{account_id}:parameter{name}" for name in parameters
+                ],
+            },
+            {
+                # The receiving workflow's view of the checking one: is one
+                # running. Starting it is the timer's job, not this role's.
+                "Effect": "Allow",
+                "Action": "states:ListExecutions",
+                "Resource": check_arn,
+            },
+            {
+                "Effect": "Allow",
+                "Action": [
+                    "scheduler:CreateSchedule",
+                    "scheduler:GetSchedule",
+                    "scheduler:DeleteSchedule",
+                ],
+                "Resource": f"arn:aws:scheduler:{region}:{account_id}:schedule/default/{schedule}",
+            },
+            {
+                # The schedule carries the role Scheduler will assume to start
+                # the check, and creating one means passing it. Held to that
+                # service, so the same grant cannot hand the role to anything
+                # else.
+                "Sid": "PassTheTimerItsRole",
+                "Effect": "Allow",
+                "Action": "iam:PassRole",
+                "Resource": f"arn:aws:iam::{account_id}:role/{scheduler_role}",
+                "Condition": {"StringEquals": {"iam:PassedToService": SCHEDULER_SERVICE}},
             },
             {
                 "Effect": "Allow",

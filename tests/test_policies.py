@@ -14,20 +14,39 @@ BOUNDARY_ARN = f"arn:aws:iam::{ACCOUNT_ID}:policy/{PREFIX}apply-boundary"
 ZONE_ID = "Z1EXAMPLE"
 DOMAIN = "example.com"
 STATE_MACHINE = "enclavize-apply"
+CHECK_MACHINE = "enclavize-apply-check"
+SCHEDULE = "enclavize-apply-check"
+SCHEDULER_ROLE = "enclavize-apply-scheduler"
+CURRENT, PENDING, READY = (f"/enclavize/apply/{w}" for w in ("current", "pending", "ready"))
+BOOKKEEPING = [GO_PARAM, CURRENT, PENDING]
 
 
-def boundary(protected=None):
+def boundary(protected=None, domain=DOMAIN):
     return policies.apply_boundary_policy(
         account_id=ACCOUNT_ID,
         region=REGION,
         resource_prefix=PREFIX,
         proof_bucket=PROOF_BUCKET,
         dashboard_bucket=DASHBOARD_BUCKET,
-        domain=DOMAIN,
+        domain=domain,
         hosted_zone_id=ZONE_ID,
         state_machine=STATE_MACHINE,
+        check_state_machine=CHECK_MACHINE,
+        parameters=BOOKKEEPING,
         protected=protected,
     )
+
+
+def state_machine_policy():
+    return policies.apply_state_machine_policy(
+        region=REGION, account_id=ACCOUNT_ID, dashboard_bucket=DASHBOARD_BUCKET,
+        check_state_machine=CHECK_MACHINE, schedule=SCHEDULE, scheduler_role=SCHEDULER_ROLE,
+        instance_name_tag="enclavize-apply", parameters=[CURRENT, PENDING, READY],
+    )
+
+
+def denial(document, sid):
+    return [s for s in statements(document, "Deny") if s.get("Sid") == sid][0]
 
 
 def statements(document, effect=None):
@@ -169,7 +188,7 @@ def test_the_state_machine_can_keep_the_index_it_has_to_rebuild():
     """Writing the record is not enough on its own. The dashboard is static and
     cannot list a bucket, so the index it reads is rebuilt from a listing on
     every apply — which needs the listing as well as the write."""
-    document = policies.apply_state_machine_policy(dashboard_bucket=DASHBOARD_BUCKET)
+    document = state_machine_policy()
     writes = next(s for s in statements(document, "Allow") if s["Action"] == "s3:PutObject")
     assert set(writes["Resource"]) == {
         f"arn:aws:s3:::{DASHBOARD_BUCKET}/{naming.APPLIES_PREFIX}*",
@@ -183,7 +202,7 @@ def test_the_state_machine_can_keep_the_index_it_has_to_rebuild():
 def test_the_state_machine_sees_nothing_else_in_the_bucket():
     """The page itself lives in the same bucket. Writing over it is not
     something an apply has any business doing."""
-    document = policies.apply_state_machine_policy(dashboard_bucket=DASHBOARD_BUCKET)
+    document = state_machine_policy()
     inside = f"arn:aws:s3:::{DASHBOARD_BUCKET}/"
     granted = [resource for statement in statements(document, "Allow")
                for resource in ([statement["Resource"]] if isinstance(statement["Resource"], str)
@@ -273,11 +292,7 @@ def test_the_boundary_does_not_defend_the_mirrors_uptime():
 
 def test_protected_record_names_are_normalised():
     # The condition key is matched against lowercase names with no trailing dot.
-    document = policies.apply_boundary_policy(
-        account_id=ACCOUNT_ID, region=REGION, resource_prefix=PREFIX,
-        proof_bucket=PROOF_BUCKET, dashboard_bucket=DASHBOARD_BUCKET,
-        domain="Example.COM.", hosted_zone_id=ZONE_ID, state_machine=STATE_MACHINE,
-    )
+    document = boundary(domain="Example.COM.")
     for sid in ("CannotTouchTheEnclavesOwnNames", "CannotTouchTheApexControlRecords"):
         denied = [s for s in statements(document, "Deny") if s["Sid"] == sid][0]
         names = denied["Condition"]["ForAnyValue:StringEquals"][
@@ -330,6 +345,8 @@ def test_the_machinery_denial_narrows_to_named_resources():
 
     assert resources != "*"
     assert f"arn:aws:states:{REGION}:{ACCOUNT_ID}:stateMachine:{STATE_MACHINE}" in resources
+    assert f"arn:aws:states:{REGION}:{ACCOUNT_ID}:stateMachine:{CHECK_MACHINE}" in resources
+    assert f"arn:aws:states:{REGION}:{ACCOUNT_ID}:execution:{CHECK_MACHINE}:*" in resources
     assert f"arn:aws:apigateway:{REGION}::/restapis/abc123" in resources
     assert f"arn:aws:cloudfront::{ACCOUNT_ID}:distribution/E1" in resources
     assert f"arn:aws:cloudfront::{ACCOUNT_ID}:distribution/E2" in resources
@@ -357,3 +374,115 @@ def test_a_narrowed_boundary_leaves_other_resources_of_those_services_alone():
     assert not any("otherapi" in r for r in denied[0]["Resource"])
     # Nor its own custom domains.
     assert not any(f"/domainnames/www.{DOMAIN}" in r for r in denied[0]["Resource"])
+
+
+# --- the handover ---------------------------------------------------------
+
+
+def test_the_check_timer_is_fenced_off_by_name():
+    """Deleting it would strand a pending apply; rewriting it would have the
+    check look on the application's terms. An application's own schedules
+    are not touched."""
+    fence = denial(boundary(), "CannotTouchTheCheckTimer")
+    assert fence["Action"] == "scheduler:*"
+    assert fence["Resource"] == f"arn:aws:scheduler:{REGION}:{ACCOUNT_ID}:schedule/default/{PREFIX}*"
+
+
+def test_the_enclaves_bookkeeping_is_closed_to_an_application_entirely():
+    """Not read-only: everything an application needs to know arrives in its
+    environment, so there is no reason to leave it a view of what is serving
+    or what is coming — and a Deny on writes alone would be a Deny with
+    something to get wrong."""
+    fence = denial(boundary(), "CannotTouchTheEnclavesBookkeeping")
+    assert fence["Action"] == "ssm:*"
+    assert set(fence["Resource"]) == {
+        f"arn:aws:ssm:{REGION}:{ACCOUNT_ID}:parameter{name}" for name in BOOKKEEPING
+    }
+
+
+def test_the_ready_flag_is_the_one_parameter_an_application_may_write():
+    """Named one by one rather than by path for exactly this reason: the path
+    also holds the ready flag, and a Deny admits no exception. The fence is
+    only as good as this list, so the go flag has to be on it too."""
+    fence = denial(boundary(), "CannotTouchTheEnclavesBookkeeping")
+    assert not any(r.endswith(READY) for r in fence["Resource"])
+    assert not any(r.endswith("/enclavize/*") or r.endswith("/apply/*") for r in fence["Resource"])
+    assert any(r.endswith(GO_PARAM) for r in fence["Resource"])
+
+
+def test_an_application_may_stop_the_instance_it_replaced():
+    """On this line retiring the previous version is the application's job,
+    so nothing here fences the enclave's instances off by tag — that would
+    break the one thing an applied commit has to do to its predecessor."""
+    sids = {s.get("Sid") for s in statements(boundary(), "Deny")}
+    assert "CannotTouchTheEnclavesInstancesOrGroups" not in sids
+    assert "CannotWearTheEnclavesName" not in sids
+    assert not any(a.startswith("ec2:") for a in actions_denied(boundary()))
+
+
+def test_the_state_machine_may_only_stop_the_enclaves_own_instances():
+    """Terminating is the one power that could reach an application's own
+    instance, so it is held to the name apply instances are tagged with — a
+    preparer among them."""
+    document = state_machine_policy()
+    terminate = next(s for s in statements(document, "Allow")
+                     if s["Action"] == "ec2:TerminateInstances")
+    assert terminate["Condition"] == {"StringEquals": {"aws:ResourceTag/Name": "enclavize-apply"}}
+
+
+def test_the_state_machine_sees_only_the_three_apply_parameters():
+    document = state_machine_policy()
+    params = next(s for s in statements(document, "Allow") if "ssm:PutParameter" in s["Action"])
+    assert set(params["Resource"]) == {
+        f"arn:aws:ssm:{REGION}:{ACCOUNT_ID}:parameter{name}" for name in (CURRENT, PENDING, READY)
+    }
+    assert set(params["Action"]) == {"ssm:GetParameter", "ssm:PutParameter", "ssm:DeleteParameter"}
+
+
+def test_the_state_machine_can_set_and_take_down_the_timer_and_only_that_one():
+    document = state_machine_policy()
+    timer = next(s for s in statements(document, "Allow") if "scheduler:CreateSchedule" in s["Action"])
+    assert set(timer["Action"]) == {
+        "scheduler:CreateSchedule", "scheduler:GetSchedule", "scheduler:DeleteSchedule",
+    }
+    assert timer["Resource"] == f"arn:aws:scheduler:{REGION}:{ACCOUNT_ID}:schedule/default/{SCHEDULE}"
+
+
+def test_the_state_machine_may_pass_only_the_timers_role_and_only_to_the_timer():
+    document = state_machine_policy()
+    passing = next(s for s in statements(document, "Allow") if s["Action"] == "iam:PassRole")
+    assert passing["Resource"] == f"arn:aws:iam::{ACCOUNT_ID}:role/{SCHEDULER_ROLE}"
+    assert passing["Condition"] == {"StringEquals": {"iam:PassedToService": "scheduler.amazonaws.com"}}
+
+
+def test_the_state_machine_looks_at_the_check_but_does_not_start_it():
+    """Starting the check is the timer's job. The receiving machine only asks
+    whether one is running, which is what refuses a second apply mid-switch."""
+    document = state_machine_policy()
+    check = next(s for s in statements(document, "Allow") if "states:" in str(s["Action"]))
+    assert check["Action"] == "states:ListExecutions"
+    assert check["Resource"] == f"arn:aws:states:{REGION}:{ACCOUNT_ID}:stateMachine:{CHECK_MACHINE}"
+
+
+def test_the_timer_can_start_the_check_and_nothing_else():
+    document = policies.apply_scheduler_role_policy(
+        region=REGION, account_id=ACCOUNT_ID, check_state_machine=CHECK_MACHINE
+    )
+    assert document["Statement"] == [{
+        "Effect": "Allow",
+        "Action": "states:StartExecution",
+        "Resource": f"arn:aws:states:{REGION}:{ACCOUNT_ID}:stateMachine:{CHECK_MACHINE}",
+    }]
+
+
+def test_the_timers_role_can_only_be_assumed_on_this_accounts_behalf():
+    """Both conditions, or a schedule in any account could name this role. The
+    source has to be the schedule group: Scheduler evaluates the condition
+    against the group, and a schedule-shaped ARN never matches."""
+    trust = policies.scheduler_trust(account_id=ACCOUNT_ID, region=REGION)
+    statement = trust["Statement"][0]
+    assert statement["Principal"] == {"Service": "scheduler.amazonaws.com"}
+    assert statement["Condition"]["StringEquals"] == {
+        "aws:SourceAccount": ACCOUNT_ID,
+        "aws:SourceArn": f"arn:aws:scheduler:{REGION}:{ACCOUNT_ID}:schedule-group/default",
+    }

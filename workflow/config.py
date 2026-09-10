@@ -8,6 +8,7 @@ inside a step.
 
 from dataclasses import dataclass, replace
 
+from enclavize.logic import naming
 from enclavize.logic.naming import proof_bucket_name  # re-exported: the cross-phase contract
 
 REGION = "us-east-1"
@@ -53,7 +54,7 @@ HANDOVER_FILE = ".enclavize-publish.json"
 On disk rather than in GITHUB_ENV, which every later step can read. Never
 uploaded as an artifact."""
 
-GO_PARAM = "/enclavize/go-flag"
+GO_PARAM = naming.go_flag_param("enclavize-")
 GO_VALUE = "go"
 
 
@@ -92,7 +93,7 @@ class Resources:
             current = getattr(self, field_name)
             renamed[field_name] = prefix + current[len(self.prefix):] if current.startswith(self.prefix) else prefix + current
         renamed["prefix"] = prefix
-        renamed["go_param"] = f"/{prefix.strip('-')}/go-flag"
+        renamed["go_param"] = naming.go_flag_param(prefix)
         return replace(self, **renamed)
 
     def instance_profile(self) -> str:

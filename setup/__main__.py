@@ -132,9 +132,18 @@ def run(*, domain: str, app_repo: str, api_key: str, region: str, res=None, log=
     )
     state_machine_arn = apply.create_state_machine(
         session.client("stepfunctions"), session.client("ec2"), session.client("ssm"),
-        res=res, app_repo=app_repo, region=region, domain=domain,
+        res=res, app_repo=app_repo, region=region, account_id=account_id, domain=domain,
+        dashboard_bucket=dashboard_bucket, role_arn=roles["sfn_role_arn"],
+        scheduler_role_arn=roles["scheduler_role_arn"],
+        ami_param=config.AMI_PARAM, instance_type=config.APPLY_INSTANCE_TYPE,
+        check_interval_minutes=config.PREPARE_CHECK_INTERVAL_MINUTES,
+    )
+    apply.create_check_machine(
+        session.client("stepfunctions"), session.client("ec2"), session.client("ssm"),
+        res=res, app_repo=app_repo, domain=domain,
         dashboard_bucket=dashboard_bucket, role_arn=roles["sfn_role_arn"],
         ami_param=config.AMI_PARAM, instance_type=config.APPLY_INSTANCE_TYPE,
+        timeout_seconds=config.PREPARE_TIMEOUT_SECONDS,
     )
     _, api_id = apply.create_api(
         session.client("apigateway"), iam_client, res=res, region=region, api_key=api_key,

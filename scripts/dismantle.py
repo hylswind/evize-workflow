@@ -28,6 +28,7 @@ from enclavize.aws import domains as domainsmod  # noqa: E402
 from enclavize.aws import ec2 as ec2mod  # noqa: E402
 from enclavize.aws import iam as iammod  # noqa: E402
 from enclavize.aws import s3 as s3mod  # noqa: E402
+from enclavize.aws import scheduler as schedmod  # noqa: E402
 from enclavize.aws import sfn as sfnmod  # noqa: E402
 from enclavize.aws import signin as signinmod  # noqa: E402
 from enclavize.aws import ssm as ssmmod  # noqa: E402
@@ -111,6 +112,18 @@ def terminate_instances(session):
     # runs next expecting to delete the ones it attached.
     print("   waiting for them to go, so the groups they hold are released")
     _safe(lambda: ec2.get_waiter("instance_terminated").wait(InstanceIds=live), None)
+
+
+def delete_schedules(session):
+    """The check machine deletes the timer the moment it decides to switch, so
+    this usually finds nothing — unless an apply was accepted and never
+    switched."""
+    scheduler = session.client("scheduler")
+    names = _safe(lambda: schedmod.schedules_named(scheduler, SETUP_RESOURCES.prefix), [])
+    if not names:
+        print("   (no timer standing)")
+    for name in names:
+        attempt(f"schedule {name}", lambda n=name: schedmod.delete_schedule(scheduler, n))
 
 
 def delete_apply_api(session, domain):
@@ -341,8 +354,11 @@ def everything(session, account: str, domain: str, *, after_instances=None):
     step("the apply API")
     delete_apply_api(session, domain)
 
-    step("the state machine")
+    step("the state machines")
     delete_state_machines(session)
+
+    step("the check timer")
+    delete_schedules(session)
 
     step("the distributions")
     delete_distributions(session, domain)
@@ -371,9 +387,17 @@ def everything(session, account: str, domain: str, *, after_instances=None):
     step("the certificate")
     delete_certificates(session, domain)
 
-    step("the go flag")
-    attempt(RESOURCES.go_param,
-            lambda: ssmmod.delete_parameter(session.client("ssm"), RESOURCES.go_param))
+    step("the parameters")
+    ssm = session.client("ssm")
+    for name in enclave_parameters():
+        attempt(name, lambda n=name: ssmmod.delete_parameter(ssm, n))
+
+
+def enclave_parameters() -> list:
+    """The go flag and the apply machinery's three, which is everything the
+    enclave keeps in Parameter Store."""
+    return [RESOURCES.go_param, SETUP_RESOURCES.apply_current_param,
+            SETUP_RESOURCES.apply_pending_param, SETUP_RESOURCES.apply_ready_param]
 
 
 def report(session, account: str, domain: str) -> list:
@@ -479,6 +503,8 @@ def still_standing(session, account: str, domain: str) -> list:
     found += [f"state machine {m['name']}" for m in _safe(
         lambda: session.client("stepfunctions").list_state_machines()["stateMachines"], [])
         if m["name"].startswith(SETUP_RESOURCES.prefix)]
+    found += [f"schedule {n}" for n in _safe(
+        lambda: schedmod.schedules_named(session.client("scheduler"), SETUP_RESOURCES.prefix), [])]
 
     ec2 = session.client("ec2")
     for reservation in _safe(lambda: ec2.describe_instances(Filters=[
@@ -489,8 +515,9 @@ def still_standing(session, account: str, domain: str) -> list:
     found += [f"anchor vpc {v['VpcId']}" for v in _safe(lambda: ec2.describe_vpcs(Filters=[
         {"Name": "tag:Name", "Values": [RESOURCES.signin_lock_vpc_tag]}])["Vpcs"], [])]
 
-    if _safe(lambda: session.client("ssm").get_parameter(
-            Name=RESOURCES.go_param), None):
-        found.append(f"go flag {RESOURCES.go_param}")
+    ssm = session.client("ssm")
+    for name in enclave_parameters():
+        if _safe(lambda n=name: ssm.get_parameter(Name=n), None):
+            found.append(f"parameter {name}")
 
     return found

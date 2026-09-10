@@ -6,10 +6,17 @@ rearrange the account's resources, or both. The account is whatever the last
 applied commit made it.
 
 An API key opens a REST endpoint that starts an Express state machine, which
-launches one instance to clone that commit and run it. The instance carries a
-role capped by a permission boundary, so a commit can build whatever it likes
-and still cannot touch the enclave: not the identities, not the sign-in lock,
-not the domain, not the proof, and not this machinery.
+decides: refuse if an apply is already in flight; launch the commit at once,
+in NEW mode, if nothing is serving yet; and otherwise launch the *serving*
+commit once more, in UPDATE mode, to prepare for the one coming, and set a
+timer. A Standard state machine, started by that timer every few minutes,
+reads whether the preparer has said ready — or whether the wait is up — and
+then launches the new commit and writes it down as serving.
+
+Every instance carries a role capped by a permission boundary, so a commit can
+build whatever it likes and still cannot touch the enclave: not the
+identities, not the sign-in lock, not the domain, not the proof, not the
+account's own bookkeeping of what is serving, and not this machinery.
 
 The boundary also propagates — an applied commit may only create principals that
 carry it — so the fence does not end at the first role a commit makes for
@@ -19,9 +26,15 @@ itself.
 import json
 
 from enclavize.aws import apigw, dns, ec2, iam, sfn
-from enclavize.logic import naming, policies, statemachine
+from enclavize.logic import checkmachine, naming, policies, statemachine
 
 from . import config
+
+
+def check_state_machine_arn(*, res, region: str, account_id: str) -> str:
+    """Known before the machine exists, which is what lets the receiving
+    machine and the roles name it first."""
+    return f"arn:aws:states:{region}:{account_id}:stateMachine:{res.apply_check_state_machine}"
 
 
 def boundary_document(*, res, account_id: str, region: str, proof_bucket: str,
@@ -35,6 +48,8 @@ def boundary_document(*, res, account_id: str, region: str, proof_bucket: str,
         domain=domain,
         hosted_zone_id=hosted_zone_id,
         state_machine=res.apply_state_machine,
+        check_state_machine=res.apply_check_state_machine,
+        parameters=res.enclave_params(),
         protected=protected,
     )
 
@@ -60,7 +75,7 @@ def tighten_boundary(iam_client, *, res, account_id: str, region: str, proof_buc
 
 def create_roles(iam_client, *, res, account_id: str, region: str, proof_bucket: str,
                  dashboard_bucket: str, domain: str, hosted_zone_id: str) -> dict:
-    """The boundary, the apply instance role, and the two service roles."""
+    """The boundary, the apply instance role, and the three service roles."""
     boundary_arn = iam.create_policy(
         iam_client,
         name=res.apply_boundary,
@@ -89,21 +104,43 @@ def create_roles(iam_client, *, res, account_id: str, region: str, proof_bucket:
     )
     iam.create_instance_profile(iam_client, name=res.apply_role, role=res.apply_role)
 
+    # One role for both workflows: the same service principal, and what they
+    # may do overlaps almost entirely.
     sfn_role_arn = iam.create_role(
         iam_client,
         name=res.apply_sfn_role,
         trust=policies.service_trust("states.amazonaws.com"),
-        description="enclavize: the apply state machine",
+        description="enclavize: the apply workflows",
     )
     iam.put_role_policy(
-        iam_client, role=res.apply_sfn_role, name="launch-and-record",
-        document=policies.apply_state_machine_policy(dashboard_bucket=dashboard_bucket),
+        iam_client, role=res.apply_sfn_role, name="launch-check-and-record",
+        document=policies.apply_state_machine_policy(
+            region=region, account_id=account_id, dashboard_bucket=dashboard_bucket,
+            check_state_machine=res.apply_check_state_machine,
+            schedule=res.apply_check_schedule, scheduler_role=res.apply_scheduler_role,
+            instance_name_tag=res.apply_state_machine,
+            parameters=[res.apply_current_param, res.apply_pending_param, res.apply_ready_param],
+        ),
     )
-    # Passing any other role — the admin one above all — would step around the
-    # boundary entirely.
+    # Passing any other role to an instance — the admin one above all — would
+    # step around the boundary entirely.
     iam.put_role_policy(
         iam_client, role=res.apply_sfn_role, name="pass-only-the-apply-role",
         document=policies.pass_role_policy(account_id=account_id, role_name=res.apply_role),
+    )
+
+    scheduler_role_arn = iam.create_role(
+        iam_client,
+        name=res.apply_scheduler_role,
+        trust=policies.scheduler_trust(account_id=account_id, region=region),
+        description="enclavize: the timer that starts the check",
+    )
+    iam.put_role_policy(
+        iam_client, role=res.apply_scheduler_role, name="start-the-check",
+        document=policies.apply_scheduler_role_policy(
+            region=region, account_id=account_id,
+            check_state_machine=res.apply_check_state_machine,
+        ),
     )
 
     api_role_arn = iam.create_role(
@@ -115,25 +152,69 @@ def create_roles(iam_client, *, res, account_id: str, region: str, proof_bucket:
     return {
         "boundary_arn": boundary_arn,
         "sfn_role_arn": sfn_role_arn,
+        "scheduler_role_arn": scheduler_role_arn,
         "api_role_arn": api_role_arn,
     }
 
 
+def launch_spec(ec2_client, ssm_client, *, res, ami_param: str, instance_type: str) -> dict:
+    """What every instance the apply machinery launches is made of. Both
+    machines launch, so both are built from this."""
+    return {
+        "image_id": ec2.resolve_ami(ssm_client, ami_param),
+        "instance_type": instance_type,
+        "subnet_id": ec2.default_subnet(ec2_client),
+        "instance_profile": res.apply_role,
+        "name_tag": res.apply_state_machine,
+    }
+
+
 def create_state_machine(sfn_client, ec2_client, ssm_client, *, res, app_repo: str, region: str,
-                         domain: str, dashboard_bucket: str, role_arn: str, ami_param: str,
-                         instance_type: str) -> str:
+                         account_id: str, domain: str, dashboard_bucket: str, role_arn: str,
+                         scheduler_role_arn: str, ami_param: str, instance_type: str,
+                         check_interval_minutes: int) -> str:
+    """The receiving machine. Names the checking one by its derived ARN, so
+    the two can be built in either order."""
     definition = statemachine.build_definition(
         app_repo=app_repo,
         domain=domain,
-        image_id=ec2.resolve_ami(ssm_client, ami_param),
-        instance_type=instance_type,
-        subnet_id=ec2.default_subnet(ec2_client),
-        instance_profile=res.apply_role,
+        **launch_spec(ec2_client, ssm_client, res=res, ami_param=ami_param,
+                      instance_type=instance_type),
         dashboard_bucket=dashboard_bucket,
-        name_tag=res.apply_state_machine,
+        check_state_machine_arn=check_state_machine_arn(res=res, region=region, account_id=account_id),
+        schedule_name=res.apply_check_schedule,
+        scheduler_role_arn=scheduler_role_arn,
+        check_interval_minutes=check_interval_minutes,
+        current_param=res.apply_current_param,
+        pending_param=res.apply_pending_param,
+        ready_param=res.apply_ready_param,
+        in_flight_error=apigw.IN_FLIGHT_ERROR,
     )
     return sfn.create_state_machine(
-        sfn_client, name=res.apply_state_machine, definition=definition, role_arn=role_arn
+        sfn_client, name=res.apply_state_machine, definition=definition, role_arn=role_arn,
+    )
+
+
+def create_check_machine(sfn_client, ec2_client, ssm_client, *, res, app_repo: str, domain: str,
+                         dashboard_bucket: str, role_arn: str, ami_param: str, instance_type: str,
+                         timeout_seconds: int) -> str:
+    """The checking machine, Standard so its runs are kept: they are the only
+    record of a switch having happened."""
+    definition = checkmachine.build_definition(
+        app_repo=app_repo,
+        domain=domain,
+        **launch_spec(ec2_client, ssm_client, res=res, ami_param=ami_param,
+                      instance_type=instance_type),
+        dashboard_bucket=dashboard_bucket,
+        schedule_name=res.apply_check_schedule,
+        current_param=res.apply_current_param,
+        pending_param=res.apply_pending_param,
+        ready_param=res.apply_ready_param,
+        timeout_seconds=timeout_seconds,
+    )
+    return sfn.create_state_machine(
+        sfn_client, name=res.apply_check_state_machine, definition=definition,
+        role_arn=role_arn, kind=sfn.STANDARD,
     )
 
 

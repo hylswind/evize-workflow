@@ -1,15 +1,23 @@
-"""Stage 3: apply a commit.
+"""Stage 3: apply a commit, then apply another while it serves.
 
 Two layers, kept apart on purpose.
 
 The first is enclavize's own contract, and it holds for *any* application: a
 repository with an executable setup.sh at its root. Post a commit, an instance
-runs that script. Those assertions never skip.
+runs that script in NEW mode. Post another while it serves, and the serving
+commit runs again in UPDATE mode to prepare; once it says ready, the new commit
+runs. Those assertions never skip.
 
 The second is whatever one particular application does once applied — a page
 that answers, checks it reports on. Those come from the profile and skip when it
 does not describe them, which is what lets this suite point at any application
 rather than one.
+
+Three applies in a row, because the contract has three answers. The first, with
+nothing serving, launches at once. The second, with the first serving, launches
+a preparer and tells it what is coming; the third, with the second pending, is
+refused. Then the preparer says ready and shuts down for real, the timer's next
+look launches the second version, and the account says so.
 
 The endpoint is `https://apply.{domain}/v1/commits`, derived from the domain. So
 this stage uses the same route an operator would, rather than looking the API up
@@ -22,7 +30,10 @@ import urllib.parse
 import pytest
 from harness import await_resolvable, fetch, head_sha, poll, post_json
 
+from enclavize.aws import apigw
 from enclavize.aws import s3 as s3mod
+from enclavize.aws import scheduler as schedmod
+from enclavize.aws import ssm as ssmmod
 from enclavize.logic import naming
 from setup import config as setup_config
 
@@ -55,13 +66,40 @@ def endpoint(profile, apply_api_key):
     return url
 
 
-@pytest.fixture(scope="session")
-def applied(profile, endpoint, apply_api_key):
-    """Apply the application's current head, once."""
-    commit = head_sha(profile.app.repo, profile.app.ref)
-    status, body = post_json(endpoint, {"commit": commit}, api_key=apply_api_key)
-    assert status == 200, f"apply returned {status}: {body}"
-    return {"commit": commit, "body": body}
+def parameter(rescue, name):
+    value = ssmmod.try_get_parameter(rescue.client("ssm"), name)
+    return json.loads(value) if value else None
+
+
+def current_version(rescue):
+    return parameter(rescue, SETUP_RESOURCES.apply_current_param)
+
+
+def pending_version(rescue):
+    return parameter(rescue, SETUP_RESOURCES.apply_pending_param)
+
+
+def ready_word(rescue):
+    return ssmmod.try_get_parameter(rescue.client("ssm"), SETUP_RESOURCES.apply_ready_param)
+
+
+def record_at(rescue, account_id, key):
+    bucket = naming.dashboard_bucket_name(account_id)
+    return json.loads(s3mod.get_bytes(rescue.client("s3"), bucket=bucket, key=key))
+
+
+def instance(rescue, instance_id):
+    return rescue.client("ec2").describe_instances(
+        InstanceIds=[instance_id]
+    )["Reservations"][0]["Instances"][0]
+
+
+def user_data_of(rescue, instance_id) -> str:
+    import base64
+    encoded = rescue.client("ec2").describe_instance_attribute(
+        InstanceId=instance_id, Attribute="userData"
+    )["UserData"].get("Value", "")
+    return base64.b64decode(encoded).decode() if encoded else ""
 
 
 # --- what the edge refuses ------------------------------------------------
@@ -89,60 +127,74 @@ def test_extra_fields_are_refused(endpoint, apply_api_key):
     assert status == 400
 
 
-# --- enclavize's contract, for any application ----------------------------
+# --- the first apply: nothing serving, so it launches at once --------------
 
 
-def test_applying_a_commit_launches_an_instance(applied):
-    """It answers immediately rather than waiting: an Express workflow tops out
-    at five minutes and API Gateway's integration at 29 seconds, while running a
-    real setup.sh takes longer than both."""
+@pytest.fixture(scope="session")
+def applied(profile, endpoint, apply_api_key):
+    """The first apply of this cycle: the commit the profile names, or the head."""
+    commit = head_sha(profile.app.repo, profile.app.ref)
+    status, body = post_json(endpoint, {"commit": commit}, api_key=apply_api_key)
+    assert status == 200, f"apply returned {status}: {body}"
+    return {"commit": commit, "body": body}
+
+
+@pytest.fixture(scope="session")
+def first_record_key(applied, rescue):
+    """Where the first apply was recorded, read while it is still what the
+    account says is serving — the parameter moves on at the switch."""
+    return current_version(rescue)["recordKey"]
+
+
+def test_the_first_apply_launches_at_once(applied):
+    """Nobody to prepare. It answers immediately rather than waiting: an
+    Express workflow tops out at five minutes and API Gateway's integration at
+    29 seconds, while running a real setup.sh takes longer than both."""
     body = applied["body"]
     assert body["status"] == "launched"
     assert body["commit"] == applied["commit"]
     assert body["instanceId"].startswith("i-")
 
 
-def keys_under(s3, bucket: str, prefix: str) -> list:
-    pages = s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix)
-    return [obj["Key"] for page in pages for obj in page.get("Contents", [])]
+def test_the_first_instance_is_told_it_is_new(applied, rescue):
+    script = user_data_of(rescue, applied["body"]["instanceId"])
+    assert "export ENCLAVIZE_MODE=NEW" in script
+    assert "ENCLAVIZE_NEXT_COMMIT" not in script
+    assert f"git checkout {applied['commit']}" in script
+
+
+def test_the_account_records_what_is_serving(applied, rescue):
+    """Written the moment the launch returns, not once the instance is up:
+    what is serving is what the next apply's preparer will be told about."""
+    serving = current_version(rescue)
+    assert serving["commit"] == applied["commit"]
+    assert serving["instanceId"] == applied["body"]["instanceId"]
+    assert serving["recordKey"].startswith(naming.APPLIES_PREFIX)
+    assert serving["since"] and serving["startedAt"]
+    assert pending_version(rescue) is None
 
 
 def test_the_apply_is_recorded_for_the_dashboard(applied, rescue, account_id):
-    """The only trace of an apply that anyone outside can see.
-
-    Waits for a record naming *this* execution rather than merely for one to
-    exist. The key carries the time, so applying the same commit twice leaves
-    two records — and the instance is what tells them apart.
-    """
-    bucket = naming.dashboard_bucket_name(account_id)
-    s3 = rescue.client("s3")
-
-    def recorded():
-        for key in keys_under(s3, bucket, naming.APPLIES_PREFIX):
-            if not key.endswith(f"_{applied['commit']}.json"):
-                continue
-            found = json.loads(s3mod.get_bytes(s3, bucket=bucket, key=key))
-            if found.get("instanceId") == applied["body"]["instanceId"]:
-                return found
-        return None
-
-    record = poll(recorded, timeout=120, interval=10,
-                  what=f"a record under s3://{bucket}/{naming.APPLIES_PREFIX} naming this instance")
-    assert record["commit"] == applied["commit"]
+    """The only trace of an apply that anyone outside can see, and the same
+    object the API answered with."""
+    record = record_at(rescue, account_id, current_version(rescue)["recordKey"])
+    assert record == applied["body"]
+    assert record["status"] == "launched"
 
 
-def test_the_dashboard_can_reach_that_record_with_no_credentials(applied, profile):
+def test_the_dashboard_can_reach_that_record_with_no_credentials(applied, rescue, profile):
     """The page is static and cannot list a bucket, so the state machine leaves
     it an index. Read over HTTPS the way a browser does, because that is the
     only path anyone outside the account has — the listing above is not one.
     """
     host = naming.dashboard_host(profile.domain)
+    key = current_version(rescue)["recordKey"]
 
     def indexed():
         code, body = fetch(f"https://{host}/{naming.APPLIES_MANIFEST_KEY}")
         if code != 200:
             return None
-        months = [entry["Key"] for entry in json.loads(body).get("months", [])]
+        months = json.loads(body).get("months", [])
         if not months:
             return None
         # This apply happened moments ago, so its month is the newest there is.
@@ -150,28 +202,33 @@ def test_the_dashboard_can_reach_that_record_with_no_credentials(applied, profil
         if code != 200:
             return None
         shard = json.loads(body)
-        keys = [entry["Key"] for entry in shard.get("applies", [])]
-        return shard if any(k.endswith(f"_{applied['commit']}.json") for k in keys) else None
+        return shard if key in shard.get("applies", []) else None
 
     shard = poll(indexed, timeout=180, interval=10,
                  what=f"https://{host}/{naming.APPLIES_MANIFEST_KEY} to index this apply")
-    assert not shard.get("truncated"), f"{shard['month']} was listed only in part"
+    assert shard.get("truncated") is False, f"{shard['month']} was listed only in part"
+    # Keys and nothing else: the page is public, and a listing's ETags and
+    # storage classes are noise to anyone reading it.
+    assert all(isinstance(k, str) for k in shard["applies"]), shard["applies"]
+    code, body = fetch(f"https://{host}/{key}")
+    assert code == 200
+    assert json.loads(body)["status"] == "launched"
 
 
 def test_the_instance_carries_the_bounded_role(applied, rescue):
     """Not the admin role: the boundary is the whole reason an applied commit
     can build freely without being able to touch the enclave."""
-    instance = rescue.client("ec2").describe_instances(
-        InstanceIds=[applied["body"]["instanceId"]]
-    )["Reservations"][0]["Instances"][0]
-    profile_arn = instance.get("IamInstanceProfile", {}).get("Arn", "")
+    found = instance(rescue, applied["body"]["instanceId"])
+    profile_arn = found.get("IamInstanceProfile", {}).get("Arn", "")
     assert profile_arn.endswith(f"/{SETUP_RESOURCES.apply_role}"), profile_arn
 
 
-# --- what one particular application does ---------------------------------
+# --- what one particular application does, while version one serves --------
 #
 # Optional. Absent from the profile, these skip and the contract above still
-# stands — which is what makes the suite usable against any application.
+# stands — which is what makes the suite usable against any application. Here
+# rather than at the end, because the version they ask about is replaced
+# below and its answers go with it.
 
 
 def test_the_application_answers(profile, applied):
@@ -189,20 +246,14 @@ def test_the_application_answers(profile, applied):
     )
 
 
-def test_the_application_reports_its_own_checks_passing(profile, applied):
-    """For an application that probes the permission boundary from inside the
-    sealed account, this is the only place IAM itself answers. Everywhere else
-    the boundary is asserted against a policy document — which says what should
-    happen, not what did.
+def results_for(profile, commit):
+    """The application's own checks, from the version that ran `commit`.
 
-    Waits for results the commit just applied produced. An application that
-    replaces itself keeps serving the previous deploy's answers until the new
-    one is ready, and those would satisfy this at once — reporting a pass for
-    work that had not run.
+    Holds out for the right version where the application names one. An
+    application that replaces itself keeps serving the previous version's
+    answers until the new one is ready, and those would satisfy this at once —
+    reporting a pass for work that had not run.
     """
-    if not profile.app.results_url:
-        pytest.skip("profile sets no app.resultsUrl")
-
     def reported():
         code, body = fetch(profile.app.results_url)
         if code != 200:
@@ -210,18 +261,175 @@ def test_the_application_reports_its_own_checks_passing(profile, applied):
         found = json.loads(body)
         # `commit` is optional in the contract. Where an application names the
         # commit behind its results, this holds out for the right ones.
-        if found.get("commit") and found["commit"] != applied["commit"]:
+        if found.get("commit") and found["commit"] != commit:
             return None
         return found
 
-    results = poll(
+    return poll(
         reported, timeout=profile.timeout("apply"), interval=15,
-        what=f"{profile.app.results_url} to report on {applied['commit'][:12]}",
+        what=f"{profile.app.results_url} to report on {commit[:12]}",
     )
 
+
+def assert_checks_passed(results):
     failed = [p for p in results.get("probes", []) if p.get("verdict") != "ok"]
     assert not failed, "the application's own checks failed:\n" + "\n".join(
         f"  {p.get('verdict')}  {p.get('name')} (expected {p.get('expected')}): {p.get('detail')}"
         for p in failed
     )
     assert results.get("ok") is True
+
+
+def test_the_application_reports_its_own_checks_passing(profile, applied):
+    """For an application that probes the permission boundary from inside the
+    sealed account, this is the only place IAM itself answers. Everywhere else
+    the boundary is asserted against a policy document — which says what should
+    happen, not what did."""
+    if not profile.app.results_url:
+        pytest.skip("profile sets no app.resultsUrl")
+    assert_checks_passed(results_for(profile, applied["commit"]))
+
+
+# --- the second apply: something serving, so a preparer goes first ----------
+
+
+@pytest.fixture(scope="session")
+def preparing(applied, endpoint, apply_api_key, profile):
+    """Apply again while the first version is serving — the next commit where
+    the profile names one, so a different version arrives, and the same one
+    again otherwise."""
+    commit = head_sha(profile.app.repo, profile.app.next_ref) if profile.app.next_ref else applied["commit"]
+    status, body = post_json(endpoint, {"commit": commit}, api_key=apply_api_key)
+    assert status == 200, f"second apply returned {status}: {body}"
+    return {"commit": commit, "body": body}
+
+
+def test_a_later_apply_launches_a_preparer_rather_than_the_commit(preparing, applied):
+    body = preparing["body"]
+    assert body["status"] == "preparing"
+    assert body["commit"] == preparing["commit"]
+    assert body["previous"] == applied["commit"]
+    assert body["preparerId"].startswith("i-")
+    assert body["preparerId"] != applied["body"]["instanceId"]
+
+
+def test_the_preparer_runs_the_serving_commit_and_is_told_what_is_coming(preparing, applied, rescue):
+    """The serving version being given the chance to prepare: checked out at
+    the commit already serving, in UPDATE mode, with the new one named."""
+    script = user_data_of(rescue, preparing["body"]["preparerId"])
+    assert f"git checkout {applied['commit']}" in script
+    assert "export ENCLAVIZE_MODE=UPDATE" in script
+    assert f"export ENCLAVIZE_NEXT_COMMIT={preparing['commit']}" in script
+
+    found = instance(rescue, preparing["body"]["preparerId"])
+    tags = {t["Key"]: t["Value"] for t in found.get("Tags", [])}
+    assert tags[naming.COMMIT_TAG] == applied["commit"]
+    assert tags[naming.PREPARING_FOR_TAG] == preparing["commit"]
+    assert found.get("IamInstanceProfile", {}).get("Arn", "").endswith(f"/{SETUP_RESOURCES.apply_role}")
+
+
+def test_the_account_says_what_is_pending_and_what_it_will_replace(preparing, applied, rescue):
+    pending = pending_version(rescue)
+    assert pending["commit"] == preparing["commit"]
+    assert pending["recordKey"].endswith(f"_{preparing['commit']}.json")
+    assert pending["previous"]["commit"] == applied["commit"]
+    assert pending["previous"]["instanceId"] == applied["body"]["instanceId"]
+    # Still serving: nothing changes until the preparer has spoken.
+    assert current_version(rescue)["instanceId"] == applied["body"]["instanceId"]
+
+
+def test_the_timer_is_set_to_look_every_few_minutes(preparing, rescue):
+    schedule = schedmod.get_schedule(rescue.client("scheduler"), SETUP_RESOURCES.apply_check_schedule)
+    assert schedule, "no schedule was created"
+    assert schedule["ScheduleExpression"] == (
+        f"rate({setup_config.PREPARE_CHECK_INTERVAL_MINUTES} minutes)"
+    )
+    assert schedule["Target"]["Arn"].endswith(
+        f":stateMachine:{SETUP_RESOURCES.apply_check_state_machine}"
+    )
+
+
+def test_a_third_apply_is_refused_while_one_is_preparing(preparing, endpoint, apply_api_key):
+    status, body = post_json(endpoint, {"commit": preparing["commit"]}, api_key=apply_api_key)
+    assert status == 409, body
+    assert body["error"] == apigw.IN_FLIGHT_ERROR
+
+
+# --- the preparer speaks, the timer looks, the second version goes in -------
+
+
+@pytest.fixture(scope="session")
+def switched(preparing, applied, rescue, profile):
+    """Wait for the whole handover. Nothing is simulated: the preparer says
+    ready and shuts itself down, and the timer the second apply set is what
+    starts the check that launches the new commit."""
+    def replaced():
+        found = current_version(rescue)
+        return found if found and found["commit"] == preparing["commit"] else None
+
+    check_wait = setup_config.PREPARE_CHECK_INTERVAL_MINUTES * 60
+    return poll(replaced, timeout=profile.timeout("apply") + check_wait, interval=30,
+                what=f"{SETUP_RESOURCES.apply_current_param} to name {preparing['commit'][:12]}")
+
+
+def test_the_preparer_spoke_and_then_went(switched, preparing, rescue):
+    """It was launched to terminate on shutdown; the application's last act in
+    UPDATE mode is to shut down. Whichever came first, the check found nothing
+    to stop."""
+    state = instance(rescue, preparing["body"]["preparerId"])["State"]["Name"]
+    assert state in ("shutting-down", "terminated"), state
+
+
+def test_the_second_version_was_launched_as_new(switched, preparing, rescue):
+    assert switched["instanceId"].startswith("i-")
+    assert switched["instanceId"] != preparing["body"]["preparerId"]
+    script = user_data_of(rescue, switched["instanceId"])
+    assert f"git checkout {preparing['commit']}" in script
+    assert "export ENCLAVIZE_MODE=NEW" in script
+
+
+def test_the_timer_and_the_word_went_with_the_switch(switched, rescue):
+    assert schedmod.get_schedule(rescue.client("scheduler"),
+                                 SETUP_RESOURCES.apply_check_schedule) is None
+    assert pending_version(rescue) is None
+    assert ready_word(rescue) is None
+
+
+def test_the_records_say_what_became_of_each_version(switched, first_record_key, preparing,
+                                                     applied, rescue, account_id):
+    old = record_at(rescue, account_id, first_record_key)
+    new = record_at(rescue, account_id, switched["recordKey"])
+    assert old["status"] == "retired"
+    assert old["commit"] == applied["commit"]
+    assert old["replacedBy"] == preparing["commit"]
+    assert new["status"] == "launched"
+    assert new["commit"] == preparing["commit"]
+    assert new["instanceId"] == switched["instanceId"]
+    assert new["previous"] == applied["commit"]
+
+
+def test_the_check_ran_from_the_timer_and_not_from_anyone(switched, rescue):
+    """The switch's only trace is the check machine's run, which is why the
+    machine is Standard. It was started by the timer's role, with no input."""
+    sfn = rescue.client("stepfunctions")
+    arn = next(m["stateMachineArn"] for m in sfn.list_state_machines()["stateMachines"]
+               if m["name"] == SETUP_RESOURCES.apply_check_state_machine)
+    executions = sfn.list_executions(stateMachineArn=arn, statusFilter="SUCCEEDED")["executions"]
+    assert executions, "no successful run of the check machine"
+    inputs = {json.loads(sfn.describe_execution(executionArn=e["executionArn"])["input"] or "{}") == {}
+              for e in executions}
+    assert inputs == {True}
+
+
+# --- and once version two has taken over -----------------------------------
+
+
+def test_the_version_serving_is_the_one_applied_second(profile, switched, preparing):
+    """From outside, with no credentials: what answers at the application's
+    URL is the commit the second apply named — and its checks pass too, this
+    time with a version to have replaced."""
+    if not profile.app.results_url:
+        pytest.skip("profile sets no app.resultsUrl")
+    results = results_for(profile, preparing["commit"])
+    assert results.get("commit") == preparing["commit"]
+    assert_checks_passed(results)

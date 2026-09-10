@@ -237,10 +237,25 @@ def test_the_apply_endpoint_has_its_own_name(rescue, profile):
 def test_the_apply_machinery_exists(rescue):
     iam = rescue.client("iam")
     for role in (SETUP_RESOURCES.apply_role, SETUP_RESOURCES.apply_sfn_role,
-                 SETUP_RESOURCES.apply_api_role):
+                 SETUP_RESOURCES.apply_api_role, SETUP_RESOURCES.apply_scheduler_role):
         iam.get_role(RoleName=role)
-    machines = rescue.client("stepfunctions").list_state_machines()["stateMachines"]
-    assert SETUP_RESOURCES.apply_state_machine in {m["name"] for m in machines}
+    machines = {m["name"]: m for m in
+                rescue.client("stepfunctions").list_state_machines()["stateMachines"]}
+    assert SETUP_RESOURCES.apply_state_machine in machines
+    assert SETUP_RESOURCES.apply_check_state_machine in machines
+    # The receiving one answers inside API Gateway's timeout; the checking
+    # one's runs are the only record of a switch, so they have to be kept.
+    assert machines[SETUP_RESOURCES.apply_state_machine]["type"] == "EXPRESS"
+    assert machines[SETUP_RESOURCES.apply_check_state_machine]["type"] == "STANDARD"
+
+
+def test_nothing_is_serving_or_pending_before_the_first_apply(rescue):
+    ssm = rescue.client("ssm")
+    for name in (SETUP_RESOURCES.apply_current_param, SETUP_RESOURCES.apply_pending_param,
+                 SETUP_RESOURCES.apply_ready_param):
+        with pytest.raises(ClientError) as caught:
+            ssm.get_parameter(Name=name)
+        assert caught.value.response["Error"]["Code"] == "ParameterNotFound", name
 
 
 def test_the_boundary_was_narrowed_to_the_enclaves_own_resources(rescue, profile, account_id, zone_id):

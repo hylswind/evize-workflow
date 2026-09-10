@@ -47,8 +47,14 @@ app:
   # executable setup.sh at its root.
   repo: acme/application
 
-  # Which commit to apply. Optional; the default branch's head otherwise.
-  ref: main
+  # Which commit to apply first. Optional; the default branch's head otherwise.
+  # `ref~N` walks back N commits, the way git spells it.
+  ref: main~1
+
+  # Which commit the second apply brings in. Optional; the same commit again
+  # otherwise, which still proves the handover but not that a different
+  # version arrived.
+  nextRef: main
 
   # --- everything below is optional ---------------------------------------
   #
@@ -80,4 +86,4 @@ app:
 timeouts:
   seal: 3600      # dispatch to a finished workflow run
   bringup: 5400   # the account building itself: certificate, then two CDNs
-  apply: 900      # an applied commit becoming visible
+  apply: 1800     # an applied commit becoming visible, or a handover completing

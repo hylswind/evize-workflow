@@ -14,6 +14,7 @@ have started against an account preflight had called ready.
 
 import dismantle
 from harness import App, Profile, leftovers
+from setup import config as setup_config
 
 APIGW = "apigateway"
 PROFILE = Profile(caller="acme/caller", domain="example.com", app=App(repo="acme/app"))
@@ -94,3 +95,100 @@ def test_another_accounts_api_gateway_is_left_alone():
     assert leftovers(Session(apigw), "123456789012", PROFILE) == [
         "rest api enclavize-apply-api", "custom domain apply.example.com"
     ]
+
+
+# --- the whole order -------------------------------------------------------
+
+
+class Nothing(dict):
+    """An answer with nothing in it, whatever is asked of it."""
+
+    def __getitem__(self, key):
+        return []
+
+    def get(self, key, default=None):
+        return default
+
+
+class Permissive:
+    """A client that answers every call with nothing and notes what was asked."""
+
+    def __init__(self, journal, service):
+        self.journal, self.service = journal, service
+
+    def get_paginator(self, name):
+        self.journal.append((self.service, name))
+
+        class Paginator:
+            def paginate(_self, **_kwargs):
+                return []
+
+        return Paginator()
+
+    def get_waiter(self, name):
+        class Waiter:
+            def wait(_self, **_kwargs):
+                return None
+
+        return Waiter()
+
+    def __getattr__(self, name):
+        def call(**kwargs):
+            self.journal.append((self.service, name, kwargs.get("Name")))
+            return Nothing()
+        return call
+
+
+class PermissiveSession:
+    def __init__(self):
+        self.journal = []
+
+    def client(self, name, **_kwargs):
+        return Permissive(self.journal, name)
+
+
+def test_the_timer_goes_with_the_state_machines_and_every_parameter_goes_last():
+    """The timer is the check machine's to delete in a live account; a
+    teardown finds one only if an apply was accepted and never switched. The
+    parameters go last of all, the ready flag among them — an application
+    wrote it, but it is the enclave's to remove."""
+    session = PermissiveSession()
+    dismantle.everything(session, "123456789012", PROFILE.domain)
+    first = {}
+    for position, call in enumerate(session.journal):
+        first.setdefault(call[:2], position)
+
+    assert first[("stepfunctions", "list_state_machines")] < first[("scheduler", "list_schedules")]
+    assert first[("scheduler", "list_schedules")] < first[("cloudfront", "list_distributions")]
+    assert first[("acm", "list_certificates")] < first[("ssm", "delete_parameter")]
+
+    deleted = [call[2] for call in session.journal if call[:2] == ("ssm", "delete_parameter")]
+    assert deleted == [
+        "/enclavize/go-flag",
+        setup_config.RESOURCES.apply_current_param,
+        setup_config.RESOURCES.apply_pending_param,
+        setup_config.RESOURCES.apply_ready_param,
+    ]
+
+
+def test_a_timer_or_a_parameter_left_standing_is_not_a_clean_account():
+    class Standing(Permissive):
+        def get_paginator(self, name):
+            class Paginator:
+                def paginate(_self, **_kwargs):
+                    return [{"Schedules": [{"Name": "enclavize-apply-check"}]}] \
+                        if name == "list_schedules" else []
+
+            return Paginator()
+
+        def get_parameter(self, Name):
+            return {"Parameter": {"Name": Name, "Value": "x"}}
+
+    class StandingSession(PermissiveSession):
+        def client(self, name, **_kwargs):
+            return Standing(self.journal, name)
+
+    standing = leftovers(StandingSession(), "123456789012", PROFILE)
+    assert "schedule enclavize-apply-check" in standing
+    assert f"parameter {setup_config.RESOURCES.apply_ready_param}" in standing
+    assert "parameter /enclavize/go-flag" in standing

@@ -55,8 +55,10 @@ def journal(monkeypatch):
     monkeypatch.setattr(bringup.cdn, "await_deployed", step("cdn_deployed", True))
     monkeypatch.setattr(bringup.apply, "create_roles", step("apply_roles", {
         "boundary_arn": "arn:b", "sfn_role_arn": "arn:sfn", "api_role_arn": "arn:api",
+        "scheduler_role_arn": "arn:sched",
     }))
     monkeypatch.setattr(bringup.apply, "create_state_machine", step("apply_sfn", "arn:sm"))
+    monkeypatch.setattr(bringup.apply, "create_check_machine", step("apply_check_sfn", "arn:check"))
     monkeypatch.setattr(bringup.apply, "create_api", step("apply_api", ("https://x/v1/commits", "api1")))
     monkeypatch.setattr(bringup.apply, "attach_custom_domain",
                         step("apply_domain", "https://apply.example.com/v1/commits"))
@@ -113,8 +115,17 @@ def test_the_apply_machinery_is_built_during_the_certificate_wait(journal):
     certificate first would waste its whole duration."""
     run()
     cert = journal.index("cert_issued")
-    for step_name in ("apply_roles", "apply_sfn", "apply_api"):
+    for step_name in ("apply_roles", "apply_sfn", "apply_check_sfn", "apply_api"):
         assert journal.index(step_name) < cert, step_name
+
+
+def test_the_timer_has_a_role_to_start_the_check_with_before_any_apply(journal):
+    """The receiving machine hands the timer that role when it sets it, and
+    setting it is the first thing a second apply does — so the role has to
+    exist by the time the API is open."""
+    run()
+    assert journal.index("apply_roles") < journal.index("apply_sfn")
+    assert journal.index("apply_roles") < journal.index("apply_api")
 
 
 def test_the_state_it_reports_is_not_cached_like_the_rest():
@@ -182,6 +193,7 @@ def test_the_full_order(journal):
         "update_ns",
         "apply_roles",
         "apply_sfn",
+        "apply_check_sfn",
         "apply_api",
         "dashboard_mark",
         "cert_issued",
@@ -334,8 +346,22 @@ def test_the_page_reads_everything_it_shows_from_its_own_bucket():
 
 def test_the_page_has_somewhere_to_put_each_field():
     page = asset("index.html")
-    for element in ('id="domain"', 'id="state"', 'id="repo"', 'id="applies"'):
+    for element in ('id="domain"', 'id="state"', 'id="repo"', 'id="applies"',
+                    'id="serving"', 'id="next"'):
         assert element in page
+
+
+def test_the_page_reads_each_apply_record_for_its_outcome():
+    """A listing says only that an apply happened. Whether it is serving,
+    preparing or gone is in the record, so the page fetches those too — and
+    shows what is serving and what is coming off the same records as the log,
+    so the two cannot disagree."""
+    script = asset("app.js")
+    assert "read(`./${record.key}`)" in script
+    for outcome in ("launched", "preparing", "retired", "failed"):
+        assert f"{outcome}:" in script, outcome
+    assert 'r.status === "launched"' in script
+    assert 'r.status === "preparing"' in script
 
 
 # --- self-termination -----------------------------------------------------
