@@ -37,7 +37,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "scripts"))
 
 import dismantle  # noqa: E402
-from harness import allowed_accounts, load_profile, unfit_to_unseal  # noqa: E402
+from harness import allowed_accounts, head_sha, load_profile, unfit_to_unseal  # noqa: E402
 
 
 def check_account(session):
@@ -79,11 +79,12 @@ def run_app_teardown(profile, *, region, assume_yes):
             ["git", "clone", "--quiet", f"https://github.com/{profile.app.repo}.git", workdir],
             check=True, capture_output=True,
         )
-        if profile.app.ref:
-            subprocess.run(["git", "-C", workdir, "checkout", "--quiet", profile.app.ref],
-                           check=True, capture_output=True)
-        sha = subprocess.run(["git", "-C", workdir, "rev-parse", "HEAD"],
-                             check=True, capture_output=True, text=True).stdout.strip()
+        # Resolved the way stage 3 resolves it, so a profile spelling the
+        # first commit as `main~1` names the same commit here: a fresh clone
+        # has no local branch for `~1` to count back from.
+        sha = head_sha(profile.app.repo, profile.app.ref)
+        subprocess.run(["git", "-C", workdir, "checkout", "--quiet", sha],
+                       check=True, capture_output=True)
 
         script = pathlib.Path(workdir) / profile.app.teardown
         if not script.exists():
