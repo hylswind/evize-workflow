@@ -41,6 +41,8 @@ pytestmark = pytest.mark.e2e
 
 SETUP_RESOURCES = setup_config.RESOURCES
 
+KEY_ANSWERS_IN_A_ROW = 10
+
 
 @pytest.fixture(scope="session")
 def endpoint(profile, apply_api_key):
@@ -54,15 +56,22 @@ def endpoint(profile, apply_api_key):
     A malformed commit is the probe: it can never reach the state machine, and
     the answer that means "ready" — refused by the validator rather than by the
     key — is the very thing the first test asserts.
+
+    One such answer is not enough. The key reaches API Gateway's nodes one by
+    one, and for some minutes after the bring-up a request may land on a node
+    that has it or on one that does not — so the first 400 can be followed by
+    a 403 on the very next call. Several in a row is the key being everywhere.
     """
     url = "https://{}/{}/{}".format(
         naming.apply_host(profile.domain), setup_config.APPLY_STAGE, setup_config.APPLY_API_PATH
     )
-    poll(
-        lambda: post_json(url, {"commit": "not-a-sha"}, api_key=apply_api_key)[0] == 400,
-        timeout=profile.timeout("apply"), interval=10,
-        what=f"{url} to accept its own API key",
-    )
+
+    def everywhere():
+        return all(post_json(url, {"commit": "not-a-sha"}, api_key=apply_api_key)[0] == 400
+                   for _ in range(KEY_ANSWERS_IN_A_ROW))
+
+    poll(everywhere, timeout=profile.timeout("apply"), interval=10,
+         what=f"{url} to accept its own API key from every node")
     return url
 
 
@@ -397,9 +406,15 @@ def test_the_timer_and_the_word_went_with_the_switch(switched, rescue):
 
 def test_the_records_say_what_became_of_each_version(switched, first_record_key, preparing,
                                                      applied, rescue, account_id):
-    old = record_at(rescue, account_id, first_record_key)
+    """The records are the check's last act, after the new version is written
+    down as serving — so they are waited for rather than read the instant the
+    switch shows in the parameter."""
+    def retired():
+        found = record_at(rescue, account_id, first_record_key)
+        return found if found["status"] == "retired" else None
+
+    old = poll(retired, timeout=120, interval=5, what="the first version's record to say retired")
     new = record_at(rescue, account_id, switched["recordKey"])
-    assert old["status"] == "retired"
     assert old["commit"] == applied["commit"]
     assert old["replacedBy"] == preparing["commit"]
     assert new["status"] == "launched"
